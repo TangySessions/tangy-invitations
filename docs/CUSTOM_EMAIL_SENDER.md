@@ -204,8 +204,67 @@ Reviewing never sends, saves, queues or calls Resend.
 - **Server:** the endpoint (`POST /api/campaigns/review`: signed in, CSRF and origin checked) parses the CSV, validates it, answers and keeps nothing. It never trusts the browser's checks, and it logs only counts, never names, addresses or bodies.
 - **Export:** none exists. If one is added, cells starting with `=`, `+`, `-` or `@` must be prefixed to block spreadsheet formulas.
 
+### Large, image-rich templates (embedded images)
+Claude-generated invitations often embed every image as base64 (`data:image/…`). Email clients block or strip those, and they make the HTML huge (Gmail clips HTML above about 102 KB). The editor accepts such documents and handles the images automatically.
+
+**Import:** paste the HTML, or use **Import an HTML file**. The file is read in the browser and nothing is uploaded until Preview or Save. The size counter is debounced, so multi-megabyte documents stay responsive.
+
+**Preview draft:**
+- Checks every embedded image and the rest of the template.
+- Shows the document **with its original embedded images**, in the sandboxed preview (no scripts, opaque origin, its own CSP), in desktop and mobile widths.
+- **Uploads nothing.**
+- A browser preview is not proof of how Gmail or Outlook will render the email; send a test.
+
+**Save** (`src/assets.js`):
+1. **Find** every data URL in an image position: `src="…"`, `background="…"`, and CSS `url(…)` in `<style>` blocks or `style` attributes, including `&quot;`-quoted ones. A data URL anywhere else is an **error** with a line number, never silently kept or dropped.
+2. **Validate** before anything is uploaded:
+   - PNG, JPEG, GIF or WebP only. SVG is refused: it can carry scripts, and Gmail and Outlook drop it.
+   - Strict base64; line-wrapped base64 is fine.
+   - The decoded bytes must really be that image type (checked by file signature). A mislabeled type is stored as its real type, with a warning.
+   - Per-image, total and count limits.
+3. **Store** each image **byte-for-byte**: never re-encoded, so dimensions, transparency and appearance are exactly the original. Files are content-addressed (`<sha256>.<ext>`), so identical images are stored once.
+4. **Rewrite** each reference in place with its hosted URL. Every other character of the document is unchanged, including placeholders.
+5. **Validate the final HTML again, then save.**
+
+If any image is invalid, or **any upload fails**, the save is refused, the template is unchanged, and the message says how many images had been uploaded. Content-addressed leftovers are harmless.
+
+**Sending:** real sends (single or campaign) are refused while an email still contains `data:` images or images from the local development store (`http://localhost`). Messages must also fit Resend's 40 MB limit. Dry runs are unaffected.
+
+**Settings** (all strictly validated; invalid values stop startup):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `TEMPLATE_IMPORT_MAX_BYTES` | 4 MB (1–20 MB) | A whole imported document including embedded images. Vercel caps requests at 4.5 MB, so stay at 4 MB or below there. |
+| `ASSET_MAX_IMAGE_BYTES` | 5 MB (64 KB–10 MB) | One decoded image |
+| `ASSET_MAX_TOTAL_BYTES` | 15 MB (1–50 MB) | All decoded images of one template |
+| `ASSET_MAX_IMAGES` | 50 (1–200) | Embedded images per template |
+| `ASSET_STORE` | `local` in development, `none` in production | `local`, `supabase` or `none` |
+| `SUPABASE_URL`, `SUPABASE_STORAGE_KEY`, `SUPABASE_STORAGE_BUCKET` | — | For `ASSET_STORE=supabase` |
+
+The *stored* HTML (after hosting) keeps the 500,000-character limit; with images hosted it is typically a few KB.
+
+**The image stores:**
+- **`local`** (development and dry runs only): files in `DATA_DIR/assets`, served by the app at `/api/assets/<sha256>.<ext>`.
+  - Served with `nosniff`, a sandboxing CSP and long caching. Only these names are served.
+  - It is refused in production and on Vercel.
+  - Recipients cannot load these images, so real sending refuses them.
+- **`supabase`** (production; **not set up yet**): a **public** Supabase Storage bucket, reached through its REST API with plain `fetch` (no new package).
+  - Objects go to `invitations/<sha256>.<ext>` and are never overwritten.
+  - Images are referenced as `https://<project>.supabase.co/storage/v1/object/public/<bucket>/invitations/…`.
+  - The storage key stays on the server: never sent to the browser, logged or serialized.
+- **`none`:** templates with embedded images are refused on save, with an explanation. Templates that already link https images work as before.
+
+**Setting up Supabase Storage** (each step needs approval):
+1. In the Supabase dashboard (Storage), create a **public** bucket, for example `invitation-assets`.
+   - Public read is required: recipients' mail clients load the images without signing in.
+   - Writes are not public; only the server key can upload.
+   - Optionally restrict it to image MIME types and a 10 MB file limit.
+2. Choose the server credential (`SUPABASE_STORAGE_KEY`). The simplest is the project's **service-role key**, but it bypasses row-level security for the **whole project**, including the database. This app otherwise connects as a least-privileged role, so prefer a narrower credential if you can, and treat this key like the database owner password. Store it only as a host secret (Vercel → Environment Variables), never in a file in the repo.
+3. Set `ASSET_STORE=supabase`, `SUPABASE_URL=https://<project>.supabase.co`, `SUPABASE_STORAGE_BUCKET=invitation-assets` and the key.
+4. Run `npm run preflight`; it reports the store without contacting it. Then save one template with images, open one hosted image URL in a browser, and send a **test** email.
+
 ### Template size: "Request is too large"
-Saving a template or previewing a draft sends the editor's fields (name, subject, HTML, plain text) in one request of at most **1 MB**. A bigger request is refused with *"Request is too large: the limit is 1 MB…"*. The cause is almost always images embedded as `data:…base64` (a single photo can be several MB). Host the images at `https://` URLs and use `<img src="https://…">`. The HTML itself may be at most 500,000 characters. The editor checks both before sending and names the field that is too big.
+Saving a template or previewing a draft sends the editor's fields (name, subject, HTML, plain text) in one request. Its limit is `TEMPLATE_IMPORT_MAX_BYTES` (default 4 MB) plus a little overhead, and **embedded images count towards it**. A bigger request is refused with *"Request is too large: the limit is …"*. Use smaller images, or raise the limit (up to 4 MB on Vercel). The editor checks the size before sending.
 
 A compact single-file demo ticket with mock event details is in `templates/tangy-ticket-demo.html` (about 9 KB, inline styles, no images). It uses only `{{recipient_name}}` and `{{recipient_email}}`. It is clearly labelled as a demo: it is not an entry pass, records no payment, and has no ticket ID or QR code. Those need a ticket data source this app does not have yet.
 

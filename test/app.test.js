@@ -313,7 +313,8 @@ test('request size limit', async () => {
   const t = await boot();
   try {
     const s = await t.login();
-    const r = await t.call('PUT', '/api/sessions/s1', { ...TEMPLATE, html: 'x'.repeat(1_100_000), expected_version: 0 }, s);
+    // Over the configured import limit (TEMPLATE_IMPORT_MAX_BYTES, default 4 MB) plus overhead.
+    const r = await t.call('PUT', '/api/sessions/s1', { ...TEMPLATE, html: 'x'.repeat(t.config.assets.maxImportBytes + 300 * 1024), expected_version: 0 }, s);
     assert.equal(r.status, 413);
   } finally { await t.close(); }
 });
@@ -996,13 +997,14 @@ test('regression: an oversized draft gets a clear 413 (limit + cause), the compa
   const t = await boot();
   try {
     const s = await t.login();
-    // The failure: the editor sent more than 1 MB (e.g. an old version with an embedded base64 image).
-    const huge = { ...TICKET, html: TICKET_HTML.replace('</body>', `<img src="data:image/png;base64,${'A'.repeat(1100 * 1024)}" alt=""></body>`) };
+    // More than the configured import limit (TEMPLATE_IMPORT_MAX_BYTES + 256 KB of request overhead).
+    const limit = t.config.assets.maxImportBytes + 256 * 1024;
+    const huge = { ...TICKET, html: TICKET_HTML.replace('</body>', `<img src="data:image/png;base64,${'A'.repeat(limit)}" alt=""></body>`) };
     for (const r of [await draftPreview(t, s, huge), await t.call('PUT', '/api/sessions/s1', { ...huge, expected_version: 0 }, s)]) {
       assert.equal(r.status, 413);
       assert.equal(r.data.code, 'too_large');
-      assert.equal(r.data.limit_bytes, 1024 * 1024);
-      assert.match(r.data.error, /^Request is too large: the limit is 1 MB\. A template is one HTML document of at most 500,000 characters\. Embedded images \(data:…base64\) make emails huge — host images at https:\/\/ URLs instead\.$/);
+      assert.equal(r.data.limit_bytes, limit);
+      assert.match(r.data.error, /^Request is too large: the limit is 4\.3 MB\. Embedded images count towards this limit \(TEMPLATE_IMPORT_MAX_BYTES\)\.$/);
     }
     // Under the body limit but over the HTML limit: refused by validation, with the field named.
     const long = { ...TICKET, html: TICKET_HTML.replace('</body>', `<p>${'x'.repeat(500_000)}</p></body>`) };

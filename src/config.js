@@ -77,6 +77,41 @@ export const SEND_LIMIT_RANGE = Object.freeze({ def: 30, min: 1, max: 1000 });
 export const RESEND_TIMEOUT_RANGE = Object.freeze({ def: 15_000, min: 1000, max: 25_000 });
 // Campaign pacing: provider requests per second (Resend's default team limit is 2/s).
 export const RESEND_RATE_RANGE = Object.freeze({ def: 2, min: 1, max: 10 });
+// Templates with embedded (data:) images. The imported HTML may be much
+// larger than a stored template: its images are moved to the asset store on
+// save and replaced by URLs (src/assets.js). Vercel caps request bodies at
+// 4.5 MB, so the default import size stays below that.
+const MB = 1024 * 1024;
+export const TEMPLATE_IMPORT_RANGE = Object.freeze({ def: 4 * MB, min: MB, max: 20 * MB });
+export const ASSET_IMAGE_RANGE = Object.freeze({ def: 5 * MB, min: 64 * 1024, max: 10 * MB });
+export const ASSET_TOTAL_RANGE = Object.freeze({ def: 15 * MB, min: MB, max: 50 * MB });
+export const ASSET_COUNT_RANGE = Object.freeze({ def: 50, min: 1, max: 200 });
+const BUCKET_RE = /^[a-z0-9][a-z0-9._-]{1,62}$/;
+
+// Where embedded images are hosted (src/assets.js):
+//   local     DATA_DIR/assets, served by this app at /api/assets/… — local
+//             development and dry runs only (default outside production)
+//   supabase  a public Supabase Storage bucket (SUPABASE_URL,
+//             SUPABASE_STORAGE_KEY, SUPABASE_STORAGE_BUCKET)
+//   none      embedded images are refused (default in production)
+function loadAssetStore(env, { production, vercel }) {
+  const kind = String(env.ASSET_STORE ?? '').trim().toLowerCase() || (production ? 'none' : 'local');
+  if (!['local', 'supabase', 'none'].includes(kind)) throw new Error('ASSET_STORE must be "local", "supabase" or "none".');
+  if (kind === 'local' && (production || vercel)) {
+    throw new Error('ASSET_STORE=local is for local development only (its files are served from this machine). In production use ASSET_STORE=supabase.');
+  }
+  if (kind !== 'supabase') return { kind };
+  let url;
+  try { url = new URL(String(env.SUPABASE_URL || '')); } catch { throw new Error('ASSET_STORE=supabase needs SUPABASE_URL (https://<project>.supabase.co).'); }
+  if (url.protocol !== 'https:') throw new Error('SUPABASE_URL must use https.');
+  const key = String(env.SUPABASE_STORAGE_KEY || '').trim();
+  if (!key) throw new Error('ASSET_STORE=supabase needs SUPABASE_STORAGE_KEY (server-side secret; never sent to the browser).');
+  const bucket = String(env.SUPABASE_STORAGE_BUCKET || '').trim();
+  if (!BUCKET_RE.test(bucket)) throw new Error('SUPABASE_STORAGE_BUCKET must be a bucket name (lower-case letters, digits, . _ -).');
+  const store = { kind, url: url.origin, bucket };
+  Object.defineProperty(store, 'key', { value: key, enumerable: false }); // never serialized or logged
+  return store;
+}
 
 // Vercel sets VERCEL=1 and VERCEL_ENV=production|preview|development. Any
 // deployed Vercel environment (production or preview) runs with production
@@ -136,6 +171,13 @@ export function loadConfig(env = process.env) {
   const sendLimitPer10Min = parseIntSetting('SEND_LIMIT_PER_10_MIN', env.SEND_LIMIT_PER_10_MIN, SEND_LIMIT_RANGE);
   const timeoutMs = parseIntSetting('RESEND_TIMEOUT_MS', env.RESEND_TIMEOUT_MS, RESEND_TIMEOUT_RANGE);
   const ratePerSecond = parseIntSetting('RESEND_RATE_LIMIT_PER_SECOND', env.RESEND_RATE_LIMIT_PER_SECOND, RESEND_RATE_RANGE);
+  const assets = {
+    store: loadAssetStore(env, { production, vercel }),
+    maxImportBytes: parseIntSetting('TEMPLATE_IMPORT_MAX_BYTES', env.TEMPLATE_IMPORT_MAX_BYTES, TEMPLATE_IMPORT_RANGE),
+    maxImageBytes: parseIntSetting('ASSET_MAX_IMAGE_BYTES', env.ASSET_MAX_IMAGE_BYTES, ASSET_IMAGE_RANGE),
+    maxTotalBytes: parseIntSetting('ASSET_MAX_TOTAL_BYTES', env.ASSET_MAX_TOTAL_BYTES, ASSET_TOTAL_RANGE),
+    maxImages: parseIntSetting('ASSET_MAX_IMAGES', env.ASSET_MAX_IMAGES, ASSET_COUNT_RANGE),
+  };
 
   // Storage must be chosen deliberately in production, and SQLite can never
   // run on Vercel (its filesystem is not persistent). There is no fallback:
@@ -164,6 +206,7 @@ export function loadConfig(env = process.env) {
     allowedOrigins,
     secureCookies: appOrigin.startsWith('https://'),
     dataDir: env.DATA_DIR || './data',
+    assets,
     // DB_BACKEND=sqlite (default in development) or postgres — never switched implicitly.
     database,
     trustProxy: truthy(env.TRUST_PROXY),

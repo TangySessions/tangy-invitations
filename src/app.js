@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import {
   validateTemplate, validateRecipient, validateEmailAddress, validateSessionName, renderEmail,
-  noTemplateMessage, TEST_RECIPIENT_NAME, PLACEHOLDERS, LIMITS,
+  noTemplateMessage, TEST_RECIPIENT_NAME, PLACEHOLDERS, LIMITS, liveImageProblem, GMAIL_CLIP_BYTES,
 } from './templatePolicy.js';
 import { SESSION_IDS, defaultLabel } from './db.js';
 import {
@@ -22,6 +22,7 @@ import { sendViaResend, checkSenderDomain } from './resend.js';
 import { reviewCsv, templateContentHash, CsvError, CSV_MAX_RECIPIENTS, CSV_MAX_ROWS } from './csvImport.js';
 import { createCampaignRoutes } from './campaigns.js';
 import { createUnsubscribeRoute } from './unsubscribe.js';
+import { createAssetStore, decodeEmbeddedImages, rewriteImages, assetName, hostEmbeddedImages, AssetError, ASSET_NAME_RE } from './assets.js';
 import { safeDbError } from './store/pgConfig.js';
 
 const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -60,7 +61,9 @@ export const STATIC_PATHS = Object.freeze(Object.keys(STATIC));
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LIMIT_TEMPLATE_BODY = 1024 * 1024;
 const LIMIT_SMALL_BODY = 8 * 1024;
-const TEMPLATE_SIZE_HINT = `A template is one HTML document of at most ${LIMITS.html.toLocaleString('en')} characters. Embedded images (data:…base64) make emails huge — host images at https:// URLs instead.`;
+const TEMPLATE_SIZE_HINT = 'Embedded images count towards this limit (TEMPLATE_IMPORT_MAX_BYTES).';
+// Validation stand-in for an embedded image (never stored or sent).
+const PENDING_ASSET = (img) => `https://embedded-image.invalid/${assetName(img)}`;
 const formatBytes = (n) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(n % (1024 * 1024) ? 1 : 0)} MB` : `${Math.round(n / 1024)} KB`);
 // Template fields the editor sends. The template is one HTML document:
 // styles go inline or in a <style> block inside it (there is no CSS field).
@@ -77,7 +80,12 @@ class HttpError extends Error {
 // serveStatic: false on Vercel — the CDN serves public/, so the function
 // never reads files from disk and answers only /api/* (anything else 404s).
 // sleep: campaign request pacing (injectable for tests).
-export function createApp({ config, db, fetchImpl = fetch, now = Date.now, log = console, loginLimiter, serveStatic = true, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+// assetStore: where embedded images go on save (src/assets.js); injectable for tests.
+export function createApp({ config, db, fetchImpl = fetch, now = Date.now, log = console, loginLimiter, serveStatic = true, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), assetStore }) {
+  const assets = assetStore ?? createAssetStore(config);
+  // Template requests may carry a whole imported HTML file with its images.
+  const LIMIT_TEMPLATE_IMPORT = config.assets.maxImportBytes + 256 * 1024;
+  const imageLimits = { maxImageBytes: config.assets.maxImageBytes, maxTotalBytes: config.assets.maxTotalBytes, maxImages: config.assets.maxImages };
   const limiter = assertLoginLimiter(loginLimiter ?? new MemoryLoginLimiter({ now }));
   const files = serveStatic
     ? Object.fromEntries(Object.entries(STATIC).map(([path, [file, type]]) => [path, { body: readFileSync(join(PUBLIC_DIR, file)), type }]))
@@ -220,7 +228,8 @@ export function createApp({ config, db, fetchImpl = fetch, now = Date.now, log =
     send(res, 200, {
       email: { ...state, sender },
       placeholders: PLACEHOLDERS,
-      limits: LIMITS,
+      limits: { ...LIMITS, import_bytes: config.assets.maxImportBytes, image_bytes: config.assets.maxImageBytes, images: config.assets.maxImages },
+      asset_store: assets.kind,
       send_limit_per_10_min: config.sendLimitPer10Min,
     });
   }
@@ -275,21 +284,87 @@ export function createApp({ config, db, fetchImpl = fetch, now = Date.now, log =
     checkOrigin(req);
     const session = await requireSession(req, { mutating: true });
     const id = sessionIdOf(rawId);
-    const body = await readJson(req, LIMIT_TEMPLATE_BODY, TEMPLATE_SIZE_HINT);
+    const body = await readJson(req, LIMIT_TEMPLATE_IMPORT, TEMPLATE_SIZE_HINT);
     onlyFields(body, [...TEMPLATE_FIELDS, 'active', 'expected_version']);
-    const draft = { subject: body.subject, html: body.html, css: '', text: body.text ?? '' };
+    // 1. Everything is checked BEFORE any image is uploaded: the embedded
+    //    images themselves, then the template with stand-in image URLs.
+    const scan = embeddedScan(body.html);
+    const draft = { subject: body.subject, html: scan.html, css: '', text: body.text ?? '' };
     const { errors, warnings } = validateTemplate(draft);
+    errors.unshift(...scan.errors);
+    warnings.unshift(...scan.warnings.filter((w) => w.code !== 'embedded_pending')); // save reports what was hosted instead
     const sessionName = validateSessionName(body.name);
     if (sessionName.error) errors.unshift({ level: 'error', field: 'name', message: sessionName.error });
     if (body.active !== undefined && typeof body.active !== 'boolean') errors.push({ level: 'error', field: 'active', message: 'active must be true or false.' });
     if (errors.length) throw new HttpError(422, 'The template was not saved. Fix the problems listed and save again.', { issues: [...errors, ...warnings] });
     if (!Number.isInteger(body.expected_version) || body.expected_version < 0) throw new HttpError(400, 'expected_version is required.');
+    // 2. Fail fast on a stale editor, before uploading anything.
+    const current = await db.getSessionTemplate(id);
+    if (current.version !== body.expected_version) {
+      throw new HttpError(409, `Someone saved a newer version of this session's template (version ${current.version}) since you loaded it. Reload it before saving.`, { code: 'version_conflict', current_version: current.version });
+    }
+    // 3. Host the images (all or nothing), then check the final HTML again.
+    let hosted = { html: body.html, summary: { embedded: 0, unique: 0, bytes: 0 } };
+    if (scan.count && assets.kind === 'none') {
+      throw new HttpError(503, `This template embeds ${scan.count} image${scan.count === 1 ? '' : 's'}, but image hosting is not configured on the server (ASSET_STORE). Nothing was saved.`, { code: 'image_hosting_not_configured' });
+    }
+    if (scan.count) {
+      try {
+        hosted = await hostEmbeddedImages(body.html, { store: assets, limits: imageLimits });
+      } catch (err) {
+        if (!(err instanceof AssetError)) throw err;
+        log.error?.(`[template] image hosting failed session=${id} admin=${session.adminId}`);
+        throw new HttpError(err.issues.some((i) => i.level === 'error') ? 422 : 502, err.message, { code: 'image_hosting_failed', issues: err.issues });
+      }
+      draft.html = hosted.html;
+      const final = validateTemplate(draft);
+      if (final.errors.length) throw new HttpError(422, 'The template was not saved: the HTML with hosted images fails validation.', { issues: final.errors });
+      if (assets.kind === 'local') warnings.push({ level: 'warning', field: 'html', message: `${hosted.summary.unique} image${hosted.summary.unique === 1 ? ' is' : 's are'} stored on this machine (local development store). Real sending needs hosted https images (ASSET_STORE=supabase).` });
+    }
+    if (Buffer.byteLength(draft.html) > GMAIL_CLIP_BYTES) warnings.push({ level: 'warning', field: 'html', message: `The HTML is ${Math.round(Buffer.byteLength(draft.html) / 1024)} KB; Gmail clips messages above about 102 KB ("[Message clipped]").` });
     const result = await db.saveSessionTemplate(id, { ...draft, name: sessionName.name, active: body.active !== false }, body.expected_version, session.adminId, now());
     if (result.conflict) {
       throw new HttpError(409, `Someone saved a newer version of this session's template (version ${result.currentVersion}) since you loaded it. Reload it before saving.`, { code: 'version_conflict', current_version: result.currentVersion });
     }
-    log.info?.(`[template] saved session=${id} version=${result.version} admin=${session.adminId}`);
-    send(res, 200, { session: await db.getSessionTemplate(id), issues: warnings });
+    log.info?.(`[template] saved session=${id} version=${result.version} admin=${session.adminId} images=${hosted.summary.embedded} unique=${hosted.summary.unique}`);
+    send(res, 200, { session: await db.getSessionTemplate(id), issues: warnings, assets: hosted.summary });
+  }
+
+  // Embedded images in a submitted HTML: validated and decoded (nothing is
+  // stored); html has them replaced by stand-in https URLs so the template
+  // policy can check everything else. restore() puts the original data URLs
+  // back into rendered output (draft previews only).
+  function embeddedScan(html) {
+    if (typeof html !== 'string') return { html, count: 0, errors: [], warnings: [], restore: (x) => x };
+    const { images, issues } = decodeEmbeddedImages(html, imageLimits);
+    const errors = issues.filter((i) => i.level === 'error');
+    const warnings = issues.filter((i) => i.level !== 'error');
+    const originals = new Map(images.map((img) => [PENDING_ASSET(img), html.slice(img.start, img.end)]));
+    if (images.length) {
+      const unique = new Set(images.map((i) => i.sha256)).size;
+      warnings.push({ level: 'warning', field: 'html', code: 'embedded_pending', message: `${images.length} embedded image${images.length === 1 ? '' : 's'} (${unique} unique) will be hosted when you save (${assets.kind === 'none' ? 'image hosting is NOT configured — saving will be refused' : `store: ${assets.kind}`}).` });
+    }
+    return {
+      html: errors.length ? html : rewriteImages(html, images, PENDING_ASSET),
+      count: images.length,
+      errors,
+      warnings,
+      restore: (out) => (originals.size ? out.replace(/https:\/\/embedded-image\.invalid\/[0-9a-f]{64}\.(?:png|jpg|gif|webp)/g, (u) => originals.get(u) ?? u) : out),
+    };
+  }
+
+  // Public (email clients load these): images of the LOCAL development store.
+  async function serveAsset(req, res, name) {
+    const found = assets.kind === 'local' && ASSET_NAME_RE.test(name) ? await assets.get(name) : null;
+    if (!found) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('Not found');
+    }
+    res.writeHead(200, {
+      'Content-Type': found.mime, 'Content-Length': found.bytes.length, 'Cache-Control': 'public, max-age=31536000, immutable',
+      'Content-Security-Policy': "default-src 'none'; sandbox", 'Cross-Origin-Resource-Policy': 'cross-origin',
+    });
+    return res.end(req.method === 'HEAD' ? undefined : found.bytes);
   }
 
   // Renders exactly what /api/send would send. Never calls Resend and never
@@ -297,20 +372,24 @@ export function createApp({ config, db, fetchImpl = fetch, now = Date.now, log =
   async function preview(req, res) {
     checkOrigin(req);
     const session = await requireSession(req, { mutating: true });
-    const body = await readJson(req, LIMIT_TEMPLATE_BODY, TEMPLATE_SIZE_HINT);
+    const body = await readJson(req, LIMIT_TEMPLATE_IMPORT, TEMPLATE_SIZE_HINT);
     onlyFields(body, ['session_id', 'source', 'draft', 'name', 'email', 'test']);
     const sessionId = sessionIdOf(body.session_id);
     let template;
     let label;
     let issues = [];
+    let restore = (x) => x;
     if (body.source === 'draft') {
       const d = body.draft;
       if (!d || typeof d !== 'object' || Array.isArray(d)) throw new HttpError(400, 'draft must be an object with the template fields.');
       onlyFields(d, TEMPLATE_FIELDS);
-      template = { subject: d.subject, html: d.html, css: '', text: d.text ?? '' };
+      // Embedded images are previewed as they are (nothing is uploaded).
+      const scan = embeddedScan(d.html);
+      template = { subject: d.subject, html: scan.html, css: '', text: d.text ?? '' };
       const v = validateTemplate(template);
-      if (v.errors.length) throw new HttpError(422, 'The draft has problems — fix them to preview.', { issues: [...v.errors, ...v.warnings] });
-      issues = v.warnings;
+      if (scan.errors.length || v.errors.length) throw new HttpError(422, 'The draft has problems — fix them to preview.', { issues: [...scan.errors, ...v.errors, ...scan.warnings, ...v.warnings] });
+      issues = [...scan.warnings, ...v.warnings];
+      restore = scan.restore;
       label = validateSessionName(d.name).name || defaultLabel(sessionId);
     } else if (body.source === 'saved') {
       template = await db.getSessionTemplate(sessionId);
@@ -333,7 +412,7 @@ export function createApp({ config, db, fetchImpl = fetch, now = Date.now, log =
     const sendable = body.source === 'saved' && template.active && hasEmail && (test || hasName);
     send(res, 200, {
       session_id: sessionId, session_label: label, source: body.source,
-      subject: rendered.subject, html: rendered.html, text: rendered.text ?? null,
+      subject: rendered.subject, html: restore(rendered.html), text: rendered.text ?? null,
       to: v.recipient.email, name: v.recipient.name, from: config.email.sender?.display ?? null,
       template_version: body.source === 'saved' ? template.version : null,
       test, issues,
@@ -444,6 +523,10 @@ export function createApp({ config, db, fetchImpl = fetch, now = Date.now, log =
     if (saved.errors.length) throw new HttpError(422, 'The saved template fails validation and cannot be sent. Fix and re-save it.', { issues: saved.errors });
     const rendered = renderEmail(template, recipient, { test });
     if (rendered.errors) throw new HttpError(422, 'This recipient produces an email that fails validation.', { issues: rendered.errors });
+    if (!config.email.dryRun) {
+      const problem = liveImageProblem(rendered);
+      if (problem) throw new HttpError(422, `${problem} Nothing was sent.`, { code: 'images_not_hosted' });
+    }
 
     const state = emailState();
     if (!state.configured) {
@@ -559,6 +642,8 @@ export function createApp({ config, db, fetchImpl = fetch, now = Date.now, log =
       if (url.pathname.startsWith('/api/')) {
         // Public: the unsubscribe token is the only credential (no sign-in,
         // no origin check — mail providers POST it directly, RFC 8058).
+        const a = /^\/api\/assets\/([^/]{1,100})$/.exec(url.pathname);
+        if (a && (req.method === 'GET' || req.method === 'HEAD')) return await serveAsset(req, res, a[1]);
         const u = /^\/api\/unsubscribe\/([^/]{1,100})$/.exec(url.pathname);
         if (u && ['GET', 'HEAD', 'POST'].includes(req.method)) return await unsubscribe(req, res, u[1]);
         const m = /^\/api\/sessions\/([^/]{1,16})$/.exec(url.pathname);

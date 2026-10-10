@@ -143,7 +143,8 @@ test('cookies, security headers, CSRF and origin checks through the adapter', as
 test('request-body limits are unchanged through the adapter', async () => {
   const d = await deployment();
   const s = await d.login();
-  const r = await d.call(0, 'PUT', '/api/sessions/s1', { ...TEMPLATE, html: 'x'.repeat(1_100_000), expected_version: 0 }, { s });
+  // Default TEMPLATE_IMPORT_MAX_BYTES (4 MB) + 256 KB overhead, under Vercel's 4.5 MB request cap.
+  const r = await d.call(0, 'PUT', '/api/sessions/s1', { ...TEMPLATE, html: 'x'.repeat(4 * 1024 * 1024 + 300 * 1024), expected_version: 0 }, { s });
   assert.equal(r.status, 413);
 });
 

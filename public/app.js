@@ -236,10 +236,11 @@ function renderSelect() {
 // ------------------------------------------------------- template editor --
 // A template is ONE HTML document (styles inline or in a <style> block).
 const tplFields = { name: 'tpl-name', subject: 'tpl-subject', html: 'tpl-html', text: 'tpl-text' };
-// Same limits the server enforces (src/app.js, src/templatePolicy.js); checked
-// here only to explain a problem before sending — the server decides.
-const MAX_TEMPLATE_REQUEST_BYTES = 1024 * 1024;
-const MAX_HTML_CHARS = 500_000;
+// The server's limits (from /api/status; defaults until it loads). Checked
+// here only to explain a problem before uploading — the server decides.
+// import_bytes: a whole imported document including embedded images (they
+// are moved to the image store on save); html: the stored document after that.
+const serverLimits = () => ({ import_bytes: 4 * 1024 * 1024, html: 500_000, images: 50, ...(state.status?.limits || {}) });
 const utf8Bytes = (s) => new TextEncoder().encode(s).length;
 const kb = (n) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(2)} MB` : `${(n / 1024).toFixed(1)} KB`);
 
@@ -278,29 +279,65 @@ function fillEditor(s) {
   renderHtmlSize();
 }
 
-function renderHtmlSize() {
+// Counting without a regex over the whole (possibly multi-MB) document.
+function countEmbedded(html) {
+  let n = 0;
+  for (let i = html.indexOf('data:image/'); i !== -1; i = html.indexOf('data:image/', i + 11)) n++;
+  return n;
+}
+
+// Debounced: typing in a multi-megabyte document stays responsive.
+let sizeTimer = null;
+function renderHtmlSize({ now = false } = {}) {
+  clearTimeout(sizeTimer);
+  if (!now) { sizeTimer = setTimeout(() => renderHtmlSize({ now: true }), 250); return; }
   const html = $('tpl-html').value;
-  const images = (html.match(/data:image\//gi) || []).length;
+  const lim = serverLimits();
+  const bytes = utf8Bytes(html);
+  const images = countEmbedded(html);
+  const store = state.status?.asset_store;
   $('tpl-html-size').textContent = html
-    ? `${html.length.toLocaleString()} of ${MAX_HTML_CHARS.toLocaleString()} characters (${kb(utf8Bytes(html))})${images ? ` · ${images} embedded image${images === 1 ? '' : 's'} (data:) — host images at https:// URLs instead` : ''}`
+    ? `${kb(bytes)} of ${kb(lim.import_bytes)}${images ? ` · ${images} embedded image${images === 1 ? '' : 's'} — ${store === 'none' ? 'image hosting is NOT configured, so saving will be refused' : 'hosted automatically when you save (the stored HTML gets https image links)'}` : ''}`
     : '';
-  $('tpl-html-size').className = `small ${html.length > MAX_HTML_CHARS || images ? 'field-error' : 'muted'}`;
+  $('tpl-html-size').className = `small ${bytes > lim.import_bytes || (images && store === 'none') ? 'field-error' : 'muted'}`;
 }
 
 // Explains an oversized template before it is sent (the server would answer
 // 413 "Request is too large"). Returns an issue list, or null when it fits.
 function templateSizeProblems(body) {
+  const lim = serverLimits();
   const total = utf8Bytes(JSON.stringify(body));
   const d = body.draft || body;
   const issues = [];
-  if ((d.html || '').length > MAX_HTML_CHARS) issues.push({ level: 'error', field: 'html', message: `The HTML has ${(d.html).length.toLocaleString()} characters; the limit is ${MAX_HTML_CHARS.toLocaleString()}.` });
-  if (total > MAX_TEMPLATE_REQUEST_BYTES) {
+  if (total > lim.import_bytes + 256 * 1024) {
     const parts = Object.keys(tplFields).map((k) => `${k} ${kb(utf8Bytes(d[k] || ''))}`).join(', ');
-    issues.push({ level: 'error', field: 'template', message: `The template is ${kb(total)}; the limit is ${kb(MAX_TEMPLATE_REQUEST_BYTES)} (${parts}).` });
+    issues.push({ level: 'error', field: 'template', message: `The template is ${kb(total)}; the limit is ${kb(lim.import_bytes)} including embedded images (${parts}). Use smaller images, or raise TEMPLATE_IMPORT_MAX_BYTES on the server.` });
   }
-  const images = ((d.html || '').match(/data:image\//gi) || []).length;
-  if (issues.length && images) issues.push({ level: 'error', field: 'html', message: `It embeds ${images} image${images === 1 ? '' : 's'} as data: URLs. Host images at https:// URLs and reference them with <img src="https://…">.` });
+  const images = countEmbedded(d.html || '');
+  if (images > lim.images) issues.push({ level: 'error', field: 'html', message: `The HTML embeds ${images} images; the limit is ${lim.images}.` });
   return issues.length ? issues : null;
+}
+
+// Imports a whole .html file into the editor (read locally; nothing is
+// uploaded until Save or Preview).
+async function importHtmlFile() {
+  const file = $('tpl-import').files[0];
+  $('tpl-import').value = '';
+  if (!file) return;
+  const lim = serverLimits();
+  if (file.size > lim.import_bytes) {
+    showIssues([{ level: 'error', field: 'html', message: `${file.name} is ${kb(file.size)}; the limit is ${kb(lim.import_bytes)} (TEMPLATE_IMPORT_MAX_BYTES).` }], 'Not imported');
+    return;
+  }
+  const text = await file.text();
+  if (!/<html[\s>]|<body[\s>]|<table[\s>]/i.test(text)) {
+    showIssues([{ level: 'error', field: 'html', message: `${file.name} does not look like an HTML email.` }], 'Not imported');
+    return;
+  }
+  $('tpl-html').value = text;
+  showIssues([{ level: 'warning', field: 'html', message: `Imported ${file.name} (${kb(file.size)}, ${countEmbedded(text)} embedded image${countEmbedded(text) === 1 ? '' : 's'}). Preview it, then Save to host its images.` }], 'Imported — not saved yet');
+  renderHtmlSize({ now: true });
+  renderTemplateState();
 }
 
 function confirmDialog(dialog) {
@@ -393,7 +430,11 @@ async function saveTemplate(e) {
     fillEditor(data.session);
     $('editor-slot').textContent = `Session ${data.session.slot}`;
     $('editor-heading').textContent = `Edit template — ${data.session.name}`;
-    showIssues(data.issues, data.issues?.length ? 'Saved — with warnings' : undefined);
+    const hosted = data.assets?.embedded
+      ? [{ level: 'warning', field: 'html', message: `${data.assets.embedded} embedded image${data.assets.embedded === 1 ? '' : 's'} hosted (${data.assets.unique} unique, ${kb(data.assets.bytes)}); the saved HTML links to them.` }]
+      : [];
+    const all = [...hosted, ...(data.issues || [])];
+    showIssues(all, all.length ? 'Saved' : undefined);
     // Any preview of this session is now stale.
     invalidatePreview(id);
     await loadSessions();
@@ -410,7 +451,10 @@ async function saveTemplate(e) {
 }
 
 // -------------------------------------------------------------- preview --
-const PREVIEW_CSP = "default-src 'none'; img-src https: data: cid:; style-src 'unsafe-inline'; font-src https: data:";
+// The preview runs in a sandbox="" iframe (no scripts, opaque origin) with
+// this CSP; images may also come from this app's own origin (the local
+// development image store).
+const PREVIEW_CSP = `default-src 'none'; img-src https: data: cid: ${location.origin}; style-src 'unsafe-inline'; font-src https: data:`;
 
 function srcdocFor(html) {
   const meta = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
@@ -1120,7 +1164,8 @@ $('logout').addEventListener('click', async () => {
 
 $('tpl-form').addEventListener('submit', saveTemplate);
 $('tpl-form').addEventListener('input', renderTemplateState);
-$('tpl-html').addEventListener('input', renderHtmlSize);
+$('tpl-html').addEventListener('input', () => renderHtmlSize());
+$('tpl-import').addEventListener('change', importHtmlFile);
 $('tpl-form').addEventListener('change', renderTemplateState);
 $('tpl-preview').addEventListener('click', previewDraft);
 $('tpl-revert').addEventListener('click', () => { fillEditor(state.editing.saved); showIssues([]); renderTemplateState(); });

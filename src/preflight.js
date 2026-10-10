@@ -68,6 +68,13 @@ export async function runPreflight({ env = process.env, checkDb = false, domainC
   if (config.previewSecretSource === 'env') add('pass', 'unsubscribe', 'PREVIEW_TOKEN_SECRET is set (value not shown): unsubscribe links stay valid across restarts and instances.');
   else { add('warn', 'unsubscribe', 'PREVIEW_TOKEN_SECRET is not set: a random key is used per process, so unsubscribe links would change on restart.'); block('set PREVIEW_TOKEN_SECRET'); }
 
+  // --- image hosting (embedded images are moved here on save)
+  const store = config.assets.store;
+  if (store.kind === 'supabase') add('pass', 'images', `Image hosting: Supabase Storage bucket "${store.bucket}" at ${store.url} (key set, value not shown). Not contacted by this preflight — confirm the bucket exists and is public.`);
+  else if (store.kind === 'local') { add(e.dryRun ? 'warn' : 'fail', 'images', 'Image hosting: local development store (files on this machine). Recipients cannot load these images; templates with embedded images cannot be sent for real.'); block('configure ASSET_STORE=supabase for templates with embedded images'); }
+  else add('info', 'images', 'Image hosting: none — templates with embedded (data:) images are refused on save; templates that link https images work.');
+  add('pass', 'images', `Limits: import ${(config.assets.maxImportBytes / 1048576).toFixed(1)} MB per template, ${(config.assets.maxImageBytes / 1048576).toFixed(1)} MB per image, ${config.assets.maxImages} images, ${(config.assets.maxTotalBytes / 1048576).toFixed(1)} MB in total.`);
+
   // --- database
   const backend = config.database.backend;
   add('info', 'database', `Backend: ${backend}.`);

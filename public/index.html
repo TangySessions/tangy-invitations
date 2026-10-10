@@ -126,6 +126,10 @@
                   placeholder="Paste this session's complete HTML email (layout, styles, images, links, buttons, footer)."></textarea>
                 <span id="tpl-html-size" class="small muted" aria-live="polite"></span>
               </label>
+              <label class="field import-field">
+                <span class="label">Import an HTML file <span class="muted">(embedded images are hosted automatically when you save)</span></span>
+                <input id="tpl-import" type="file" accept=".html,.htm,text/html">
+              </label>
               <p id="tpl-css-merged" class="alert alert-info small" hidden>This session was saved with a separate CSS field. Its CSS is now shown inside the HTML as a <code>&lt;style&gt;</code> block — the email looks the same. Save to store it as one HTML document.</p>
               <label class="field">
                 <span class="label">Plain-text alternative <span class="muted">(optional)</span></span>

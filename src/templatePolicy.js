@@ -71,6 +71,9 @@ const LINK_ATTRS = new Set(['href', 'cite', 'longdesc', 'action', 'xlink:href', 
 const IMAGE_ATTRS = new Set(['src', 'background', 'poster', 'lowsrc', 'dynsrc']);
 const LINK_SCHEMES = new Set(['https', 'http', 'mailto', 'tel']);
 const DATA_IMAGE_RE = /^data:image\/(png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i;
+// Images hosted by the local development store (src/assets.js) — the only
+// http image URLs accepted. Real sending refuses them (liveImageProblem).
+const LOCAL_ASSET_RE = /^http:\/\/(localhost|127\.0\.0\.1)(:\d{1,5})?\/api\/assets\/[0-9a-f]{64}\.(png|jpg|gif|webp)$/i;
 
 const NAMED_ENTITIES = {
   amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", colon: ':', tab: '\t', newline: '\n', nbsp: String.fromCharCode(0xa0),
@@ -143,6 +146,7 @@ function checkUrl(kind, raw, issues, field, line, attr) {
   }
   if (kind === 'image') {
     if (scheme === 'https' || scheme === 'cid') return;
+    if (scheme === 'http' && LOCAL_ASSET_RE.test(v)) return;
     if (scheme === 'http') { issues.error(field, `Images must use https:// (${attr}="${raw.slice(0, 60)}").`, line); return; }
     if (scheme === 'data' && DATA_IMAGE_RE.test(v)) {
       issues.warning(field, 'Embedded data: images are blocked by Gmail and others — prefer an https image URL.', line);
@@ -427,6 +431,28 @@ export function addUnsubscribeFooter(rendered, url) {
   const html = /<\/body\s*>/i.test(rendered.html) ? rendered.html.replace(/<\/body\s*>/i, (m) => `${block}\n${m}`) : `${rendered.html}\n${block}`;
   const line = `You received this invitation from Tangy Sessions. Unsubscribe from future invitations: ${url}`;
   return { ...rendered, html, text: rendered.text ? `${rendered.text}\n\n${line}` : line };
+}
+
+// Resend's documented maximum email size (message including attachments).
+export const PROVIDER_MAX_EMAIL_BYTES = 40 * 1024 * 1024;
+// Gmail clips HTML bodies above about 102 KB ("[Message clipped]").
+export const GMAIL_CLIP_BYTES = 102 * 1024;
+
+// For REAL sends: every image must be a hosted https URL (embedded data:
+// images are blocked by Gmail; local-store http URLs only work on this
+// machine), and the message must fit the provider's size limit. Returns a
+// message, or null when the email may be sent.
+export function liveImageProblem(rendered) {
+  const html = rendered.html;
+  const img = /(?:\b(?:src|background)\s*=\s*["']?|url\(\s*["']?)\s*(data:|http:)/i.exec(html);
+  if (img) {
+    return img[1].toLowerCase() === 'data:'
+      ? 'This email still embeds images as data: URLs (Gmail blocks them). Re-save the template so its images are hosted, then preview again.'
+      : 'This email references images on the local development store (http://localhost), which recipients cannot load. Host the images (ASSET_STORE=supabase), re-save the template, then preview again.';
+  }
+  const size = Buffer.byteLength(html) + Buffer.byteLength(rendered.text || '') + Buffer.byteLength(rendered.subject || '');
+  if (size > PROVIDER_MAX_EMAIL_BYTES - 64 * 1024) return 'This email is larger than the provider allows (40 MB).';
+  return null;
 }
 
 // autoText: when the template has no plain text, derive it from the HTML.

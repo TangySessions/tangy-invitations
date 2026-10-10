@@ -44,7 +44,7 @@
 // (A request already in flight cannot be recalled.)
 import { randomUUID } from 'node:crypto';
 import { reviewCsv, templateContentHash, CsvError } from './csvImport.js';
-import { validateTemplate, renderEmail, noTemplateMessage, addUnsubscribeFooter } from './templatePolicy.js';
+import { validateTemplate, renderEmail, noTemplateMessage, addUnsubscribeFooter, liveImageProblem } from './templatePolicy.js';
 import { unsubscribeKey, unsubscribeToken, tokenHash, suppressionHash, unsubscribeUrl } from './unsubscribe.js';
 import { sendViaResend } from './resend.js';
 import { RECIPIENT_STATUSES, MAX_ATTEMPTS } from './store/campaignRules.js';
@@ -255,6 +255,8 @@ export function createCampaignRoutes(ctx) {
     if (!config.email.dryRun) {
       if (!emailState().configured) return stop('error');
       if (!config.appOrigin.startsWith('https://')) return stop('error', 'insecure_origin');
+      const imageProblem = liveImageProblem({ html: template.html, text: template.text, subject: template.subject });
+      if (imageProblem) return ['error', `${imageProblem} Nothing was sent.`];
       if ((await senderStatus()).state === 'not_verified') return stop('sender_not_verified');
     }
     return null;
