@@ -1,0 +1,16 @@
+# Secrets — never commit. Copy .env.example to .env locally; set real values
+# as host environment variables in production.
+.env
+.env.*
+!.env.example
+
+# Runtime data: the SQLite database holds the saved template, admin password
+# hashes, sessions and the send log.
+data/
+*.db
+*.db-wal
+*.db-shm
+
+node_modules/
+.DS_Store
+*.log

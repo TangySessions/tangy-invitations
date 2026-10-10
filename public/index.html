@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <title>Invitation Manager · Tangy Sessions</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <!-- Shown until the session check finishes. -->
+  <div id="boot" class="center-screen" aria-live="polite"><p class="muted">Verifying access…</p></div>
+
+  <!-- Sign in -->
+  <div id="login-view" class="center-screen" hidden>
+    <form id="login-form" class="login-card" novalidate>
+      <div class="brand brand-lg"><span class="brand-mark" aria-hidden="true">T</span><span class="brand-name">Tangy Sessions</span></div>
+      <h1 class="login-title">Invitation Manager</h1>
+      <p class="muted small">Internal tool. Sign in with your sender account.</p>
+      <label class="field">
+        <span class="label">Email</span>
+        <input id="login-email" type="email" autocomplete="username" required maxlength="254">
+      </label>
+      <label class="field">
+        <span class="label">Password</span>
+        <input id="login-password" type="password" autocomplete="current-password" required maxlength="256">
+      </label>
+      <p id="login-error" class="alert alert-bad" role="alert" hidden></p>
+      <button id="login-submit" type="submit" class="btn btn-primary btn-block">Sign in</button>
+    </form>
+  </div>
+
+  <!-- App -->
+  <div id="app-view" hidden>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a class="brand" href="#dashboard" aria-label="Tangy Sessions — Invitation Manager">
+          <span class="brand-mark" aria-hidden="true">T</span>
+          <span class="brand-name">Tangy Sessions</span>
+        </a>
+        <button id="nav-toggle" class="nav-toggle" type="button" aria-expanded="false" aria-controls="main-nav">
+          <span class="nav-toggle-bars" aria-hidden="true"></span><span>Menu</span>
+        </button>
+        <nav id="main-nav" class="main-nav" aria-label="Sections">
+          <a class="nav-link" href="#dashboard" data-section="dashboard">Dashboard</a>
+          <a class="nav-link" href="#sessions" data-section="sessions">Sessions</a>
+          <a class="nav-link" href="#send" data-section="send">Send Invitations</a>
+          <a class="nav-link" href="#review" data-section="review">New Campaign</a>
+          <a class="nav-link" href="#campaigns" data-section="campaigns">Campaigns</a>
+          <a class="nav-link" href="#recent" data-section="recent">Recent Sends</a>
+        </nav>
+        <div class="topbar-user">
+          <span class="who small muted" id="who"></span>
+          <button id="logout" type="button" class="btn btn-ghost btn-sm">Sign out</button>
+        </div>
+      </div>
+    </header>
+
+    <main id="main" class="layout">
+      <!-- Dashboard -->
+      <section id="dashboard" class="page-section" aria-labelledby="page-title">
+        <div class="page-header">
+          <div>
+            <h1 id="page-title" class="page-title">Invitation Manager</h1>
+            <p class="page-subtitle">Manage sessions, personalize invitations, and track sending activity.</p>
+          </div>
+          <a href="#send" id="cta-send" class="btn btn-primary btn-lg">Send an invitation <span aria-hidden="true">→</span></a>
+        </div>
+
+        <div id="mode-banner" class="mode-banner" role="status" hidden></div>
+        <div id="status-strip" class="status-strip" aria-label="Email configuration" aria-live="polite"></div>
+
+        <ul id="summary" class="summary-grid" aria-label="Summary"></ul>
+      </section>
+
+      <!-- Sessions -->
+      <section id="sessions" class="page-section" aria-labelledby="sessions-heading">
+        <div class="section-head">
+          <div>
+            <h2 id="sessions-heading" class="section-title">Sessions</h2>
+            <p class="muted small">Four independent slots. Each has its own name, subject, HTML/CSS and plain text — saving one never changes another.</p>
+          </div>
+        </div>
+        <ul id="session-cards" class="session-grid" aria-label="Session slots"></ul>
+
+        <!-- Workspace: session list + template editor for the selected session -->
+        <div class="workspace" aria-label="Session workspace">
+          <div class="workspace-list">
+            <p class="ws-label">Session list</p>
+            <ul id="ws-list" class="ws-items" aria-label="Choose a session to edit"></ul>
+            <p class="ws-help">Placeholders: <code>{{recipient_name}}</code> <code>{{recipient_email}}</code> — filled in per recipient on the server.</p>
+          </div>
+
+          <section id="editor" class="workspace-detail" aria-labelledby="editor-heading" hidden>
+            <div class="detail-head">
+              <div>
+                <p class="eyebrow" id="editor-slot"></p>
+                <h3 id="editor-heading" class="detail-title">Edit template</h3>
+              </div>
+              <span id="tpl-state" class="pill" aria-live="polite"></span>
+            </div>
+            <form id="tpl-form" novalidate>
+              <div class="row-2">
+                <label class="field">
+                  <span class="label">Session name <span class="muted">(shown to admins only)</span></span>
+                  <input id="tpl-name" type="text" maxlength="80" required autocomplete="off">
+                </label>
+                <label class="switch-field">
+                  <input id="tpl-active" type="checkbox" role="switch" checked>
+                  <span class="switch" aria-hidden="true"></span>
+                  <span>Available for sending</span>
+                </label>
+              </div>
+              <label class="field">
+                <span class="label">Email subject</span>
+                <input id="tpl-subject" type="text" maxlength="200" required spellcheck="true">
+              </label>
+              <label class="field">
+                <span class="label">Email HTML <span class="muted">— one complete document; inline styles or a &lt;style&gt; block in &lt;head&gt;</span></span>
+                <textarea id="tpl-html" class="code" rows="16" spellcheck="false" autocapitalize="off" autocomplete="off" required aria-describedby="tpl-html-size"
+                  placeholder="Paste this session's complete HTML email (layout, styles, images, links, buttons, footer)."></textarea>
+                <span id="tpl-html-size" class="small muted" aria-live="polite"></span>
+              </label>
+              <p id="tpl-css-merged" class="alert alert-info small" hidden>This session was saved with a separate CSS field. Its CSS is now shown inside the HTML as a <code>&lt;style&gt;</code> block — the email looks the same. Save to store it as one HTML document.</p>
+              <label class="field">
+                <span class="label">Plain-text alternative <span class="muted">(optional)</span></span>
+                <textarea id="tpl-text" rows="5"></textarea>
+              </label>
+              <div id="tpl-issues" class="issues" aria-live="polite" hidden></div>
+              <div class="actions">
+                <button id="tpl-save" type="submit" class="btn btn-primary">Save changes</button>
+                <button id="tpl-preview" type="button" class="btn btn-secondary">Preview draft</button>
+                <button id="tpl-revert" type="button" class="btn btn-ghost" hidden>Cancel changes</button>
+              </div>
+              <p id="tpl-meta" class="small muted"></p>
+            </form>
+          </section>
+        </div>
+      </section>
+
+      <!-- Send + preview -->
+      <div class="send-preview-grid">
+        <section id="send" class="page-section card send-card" aria-labelledby="send-heading">
+          <div class="section-head">
+            <div>
+              <h2 id="send-heading" class="section-title">Send invitation</h2>
+              <p class="muted small">One recipient at a time, using the selected session's saved template.</p>
+            </div>
+          </div>
+          <form id="send-form" novalidate>
+            <ol class="steps">
+              <li class="step">
+                <span class="step-num" aria-hidden="true">1</span>
+                <div class="step-body">
+                  <label class="field">
+                    <span class="label">Select the session</span>
+                    <select id="send-session" required aria-describedby="send-session-info"></select>
+                    <span id="send-session-info" class="small muted"></span>
+                  </label>
+                  <p id="send-blocked" class="alert alert-warn" hidden></p>
+                  <p id="send-unsaved" class="alert alert-info small" hidden>You have unsaved edits to this session. Sending always uses the <strong>saved</strong> template.</p>
+                </div>
+              </li>
+              <li class="step">
+                <span class="step-num" aria-hidden="true">2</span>
+                <div class="step-body">
+                  <div class="row-2 row-2-even">
+                    <label class="field">
+                      <span class="label">Recipient name</span>
+                      <input id="rcpt-name" type="text" maxlength="100" autocomplete="off" required aria-describedby="rcpt-name-err">
+                      <span id="rcpt-name-err" class="field-error" hidden></span>
+                    </label>
+                    <label class="field">
+                      <span class="label">Recipient email</span>
+                      <input id="rcpt-email" type="email" maxlength="254" autocomplete="off" required aria-describedby="rcpt-email-err">
+                      <span id="rcpt-email-err" class="field-error" hidden></span>
+                    </label>
+                  </div>
+                </div>
+              </li>
+              <li class="step">
+                <span class="step-num" aria-hidden="true">3</span>
+                <div class="step-body">
+                  <span class="label">Preview the invitation</span>
+                  <div class="actions">
+                    <button id="send-preview" type="button" class="btn btn-secondary">Preview invitation</button>
+                  </div>
+                  <p id="send-hint" class="small muted" aria-live="polite"></p>
+                </div>
+              </li>
+              <li class="step">
+                <span class="step-num" aria-hidden="true">4</span>
+                <div class="step-body">
+                  <span class="label">Send</span>
+                  <div class="actions">
+                    <button id="send-real" type="submit" class="btn btn-primary">Send invitation</button>
+                    <button id="send-test" type="button" class="btn btn-secondary">Send test email</button>
+                  </div>
+                </div>
+              </li>
+            </ol>
+          </form>
+          <div id="send-result" class="result" aria-live="polite" hidden></div>
+        </section>
+
+        <!-- Preview -->
+        <section id="preview" class="card preview-card" aria-labelledby="preview-heading">
+          <div class="section-head">
+            <h2 id="preview-heading" class="section-title">Preview</h2>
+            <div class="seg" role="group" aria-label="Preview width">
+              <button type="button" class="seg-btn" data-width="desktop" aria-pressed="true">Desktop</button>
+              <button type="button" class="seg-btn" data-width="mobile" aria-pressed="false">Mobile</button>
+            </div>
+          </div>
+          <p id="preview-stale" class="alert alert-warn small" hidden>This preview is out of date — the template, session or recipient changed. Preview again.</p>
+          <dl id="preview-meta" class="preview-meta" hidden>
+            <div><dt>Session</dt><dd><strong id="pv-session"></strong></dd></div>
+            <div><dt>From</dt><dd id="pv-from"></dd></div>
+            <div><dt>To</dt><dd id="pv-to"></dd></div>
+            <div><dt>Subject</dt><dd><strong id="pv-subject"></strong></dd></div>
+            <div><dt>Source</dt><dd id="pv-source"></dd></div>
+          </dl>
+          <div id="preview-empty" class="preview-empty small muted">Preview a session or invitation to render it here. Previewing never sends anything.</div>
+          <div class="frame-wrap" id="frame-wrap" hidden>
+            <!-- sandbox="" (no allow-scripts, no allow-same-origin): the email runs in an
+                 opaque origin with scripts disabled and cannot reach this app's cookies,
+                 storage or API. -->
+            <iframe id="preview-frame" title="Email preview" sandbox="" referrerpolicy="no-referrer" loading="lazy"></iframe>
+          </div>
+          <p class="small muted">Browser preview only — the email keeps its own styling. Gmail, Outlook and Apple Mail differ; send a test email to check real rendering.</p>
+        </section>
+      </div>
+
+      <!-- CSV list review (review only: nothing is stored, queued or sent) -->
+      <section id="review" class="page-section card" aria-labelledby="review-heading">
+        <div class="section-head">
+          <div>
+            <h2 id="review-heading" class="section-title">New campaign · 1. Review the recipient list</h2>
+            <p class="muted small">Check a CSV of recipients against a session's saved template. Reviewing saves and sends nothing. When the list looks right, <strong>confirm</strong> it to create a campaign; sending starts only when you press Start on the campaign.</p>
+          </div>
+        </div>
+        <form id="review-form" novalidate>
+          <div class="row-2 row-2-even">
+            <label class="field">
+              <span class="label">Session</span>
+              <select id="review-session" required></select>
+            </label>
+            <label class="field">
+              <span class="label">CSV file <span class="muted">(read in this browser; up to 1 MB)</span></span>
+              <input id="review-file" type="file" accept=".csv,text/csv,text/plain">
+            </label>
+          </div>
+          <label class="field">
+            <span class="label">CSV content <span class="muted">— first line <code>name,email</code> (either order); quote names that contain commas</span></span>
+            <textarea id="review-csv" class="code" rows="8" spellcheck="false" autocapitalize="off" autocomplete="off"
+              placeholder="name,email&#10;&quot;Doe, Jane&quot;,jane@example.com"></textarea>
+          </label>
+          <p id="review-error" class="alert alert-bad" role="alert" hidden></p>
+          <div class="actions">
+            <button id="review-run" type="submit" class="btn btn-primary">Review list</button>
+            <button id="review-clear" type="button" class="btn btn-ghost">Clear</button>
+          </div>
+        </form>
+
+        <div id="review-out" aria-live="polite" hidden>
+          <ul id="review-counts" class="summary-grid review-counts" aria-label="Import counts"></ul>
+          <dl id="review-meta" class="kv review-meta"></dl>
+          <p id="review-warn" class="alert alert-warn small" hidden></p>
+          <div id="review-previous" class="alert alert-warn small" hidden></div>
+          <div class="actions review-confirm-bar">
+            <button id="review-confirm" type="button" class="btn btn-primary">Confirm campaign…</button>
+            <span id="review-unavailable" class="small muted" hidden></span>
+          </div>
+
+          <div class="review-grid">
+            <div>
+              <h3 class="detail-title">Valid recipients</h3>
+              <div class="table-wrap">
+                <table class="review-table">
+                  <thead><tr><th scope="col">Row</th><th scope="col">Name</th><th scope="col">Email</th><th scope="col"><span class="visually-hidden">Preview</span></th></tr></thead>
+                  <tbody id="review-rows"></tbody>
+                </table>
+              </div>
+              <div class="actions pager">
+                <button id="review-prev" type="button" class="btn btn-secondary btn-sm">Previous</button>
+                <span id="review-page" class="small muted"></span>
+                <button id="review-next" type="button" class="btn btn-secondary btn-sm">Next</button>
+              </div>
+
+              <h3 class="detail-title">Rows not included</h3>
+              <ul id="review-problems" class="review-problems"></ul>
+            </div>
+
+            <div>
+              <h3 class="detail-title">Personalized preview</h3>
+              <dl class="preview-meta">
+                <div><dt>To</dt><dd id="rv-to"></dd></div>
+                <div><dt>Subject</dt><dd><strong id="rv-subject"></strong></dd></div>
+              </dl>
+              <p id="rv-error" class="alert alert-bad small" hidden></p>
+              <div class="frame-wrap">
+                <!-- Same isolation as the main preview: no scripts, opaque origin. -->
+                <iframe id="review-frame" title="Personalized preview" sandbox="" referrerpolicy="no-referrer" loading="lazy"></iframe>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Campaigns: list and detail -->
+      <section id="campaigns" class="page-section card" aria-labelledby="campaigns-heading">
+        <div id="campaign-list-view">
+          <div class="section-head">
+            <div>
+              <h2 id="campaigns-heading" class="section-title">Campaigns</h2>
+              <p class="muted small">Confirmed lists and their sending results. “Accepted” means Resend accepted the email — delivery, bounces and opens are only visible in Resend.</p>
+            </div>
+            <button id="campaigns-refresh" type="button" class="btn btn-secondary btn-sm">Refresh</button>
+          </div>
+          <p id="campaigns-unavailable" class="alert alert-warn small" hidden></p>
+          <div class="table-wrap">
+            <table class="review-table campaign-table">
+              <thead><tr><th scope="col">Campaign</th><th scope="col">Session</th><th scope="col">Confirmed</th><th scope="col">Recipients</th><th scope="col">Status</th><th scope="col">Accepted</th><th scope="col">Failed</th><th scope="col">Pending</th></tr></thead>
+              <tbody id="campaign-rows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="campaign-detail" hidden>
+          <div class="section-head">
+            <div>
+              <button id="campaign-back" type="button" class="btn btn-ghost btn-sm">← All campaigns</button>
+              <h2 id="cd-title" class="section-title"></h2>
+              <p id="cd-sub" class="muted small"></p>
+            </div>
+            <span id="cd-status" class="pill"></span>
+          </div>
+          <p id="cd-mode" class="alert small" hidden></p>
+          <p id="cd-stop" class="alert alert-warn small" role="status" hidden></p>
+          <ul id="cd-counts" class="summary-grid review-counts" aria-label="Recipient counts"></ul>
+          <dl id="cd-meta" class="kv review-meta"></dl>
+          <div class="actions" id="cd-actions"></div>
+          <p id="cd-progress" class="small muted" aria-live="polite"></p>
+          <div class="cd-filter">
+            <label class="field field-inline">
+              <span class="label">Show</span>
+              <select id="cd-filter">
+                <option value="">All recipients</option>
+                <option value="pending">Pending</option>
+                <option value="claimed">Sending now</option>
+                <option value="accepted">Accepted by Resend</option>
+                <option value="dry_run">Simulated (dry run)</option>
+                <option value="failed">Failed (not sent)</option>
+                <option value="rejected">Rejected by Resend</option>
+                <option value="unresolved">Unresolved (check Resend)</option>
+                <option value="skipped">Skipped</option>
+              </select>
+            </label>
+          </div>
+          <div class="table-wrap">
+            <table class="review-table">
+              <thead><tr><th scope="col">Row</th><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Status</th><th scope="col">Attempts</th><th scope="col">Detail</th></tr></thead>
+              <tbody id="cd-rows"></tbody>
+            </table>
+          </div>
+          <div class="actions pager">
+            <button id="cd-prev" type="button" class="btn btn-secondary btn-sm">Previous</button>
+            <span id="cd-page" class="small muted"></span>
+            <button id="cd-next" type="button" class="btn btn-secondary btn-sm">Next</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Recent sends -->
+      <section id="recent" class="page-section card" aria-labelledby="log-heading">
+        <div class="section-head">
+          <div>
+            <h2 id="log-heading" class="section-title">Recent sends</h2>
+            <p class="muted small">The latest 25 attempts. “Accepted” means Resend accepted the message — delivery, bounces and opens are only visible in the Resend dashboard.</p>
+          </div>
+          <button id="log-refresh" type="button" class="btn btn-secondary btn-sm">Refresh</button>
+        </div>
+        <ul id="log-body" class="send-list" aria-label="Recent sends"></ul>
+      </section>
+    </main>
+  </div>
+
+  <!-- Send confirmation (real and test) -->
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title">
+    <form method="dialog" class="dialog-body">
+      <h2 id="confirm-title" class="dialog-title">Send this invitation?</h2>
+      <p id="cf-warning" class="alert alert-warn">This sends a <strong>real email</strong> to the address below.</p>
+      <dl class="kv">
+        <dt>Session</dt><dd id="cf-session"></dd>
+        <dt>Recipient name</dt><dd id="cf-name"></dd>
+        <dt>Recipient email</dt><dd id="cf-email"></dd>
+        <dt>Subject</dt><dd id="cf-subject"></dd>
+        <dt>From</dt><dd id="cf-from"></dd>
+        <dt>Template</dt><dd id="cf-version"></dd>
+      </dl>
+      <div class="actions end">
+        <button value="cancel" class="btn btn-ghost" autofocus>Cancel</button>
+        <button value="confirm" class="btn btn-primary" id="cf-confirm">Send invitation</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Test destination -->
+  <dialog id="test-dialog" aria-labelledby="test-title">
+    <form method="dialog" class="dialog-body" id="test-form" novalidate>
+      <h2 id="test-title" class="dialog-title">Send a test email</h2>
+      <p class="small muted">Uses <strong id="tf-session"></strong>'s saved template with the name “Test Recipient” and a <code>[TEST]</code> subject prefix. You'll confirm on the next step.</p>
+      <label class="field">
+        <span class="label">Send the test to</span>
+        <input id="test-email" type="email" maxlength="254" autocomplete="email" required aria-describedby="test-email-err">
+        <span id="test-email-err" class="field-error" hidden></span>
+      </label>
+      <div class="actions end">
+        <button value="cancel" class="btn btn-ghost" formnovalidate>Cancel</button>
+        <button value="confirm" class="btn btn-primary">Continue</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Campaign confirmation -->
+  <dialog id="campaign-dialog" aria-labelledby="cc-title">
+    <form method="dialog" class="dialog-body" id="cc-form" novalidate>
+      <h2 id="cc-title" class="dialog-title">Confirm this campaign?</h2>
+      <p class="small">Confirming <strong>saves</strong> the campaign with exactly this list and this template version. It does not send anything yet — you start sending from the campaign page. Even then, Resend accepting an email does not guarantee delivery. Every campaign email ends with an unsubscribe link (and one-click unsubscribe headers); addresses that unsubscribed are never sent.</p>
+      <dl class="kv">
+        <dt>Session</dt><dd id="cc-session"></dd>
+        <dt>Template</dt><dd id="cc-template"></dd>
+        <dt>Recipients</dt><dd id="cc-count"></dd>
+        <dt>Left out</dt><dd id="cc-skipped"></dd>
+        <dt>Sample</dt><dd id="cc-sample"></dd>
+        <dt>From</dt><dd id="cc-from"></dd>
+        <dt>Mode</dt><dd id="cc-mode"></dd>
+      </dl>
+      <label class="field">
+        <span class="label">Campaign name <span class="muted">(admins only)</span></span>
+        <input id="cc-name" type="text" maxlength="100" required autocomplete="off">
+      </label>
+      <label class="field">
+        <span class="label">Type the number of recipients (<strong id="cc-expected"></strong>) to confirm</span>
+        <input id="cc-typed" type="text" inputmode="numeric" autocomplete="off" required>
+      </label>
+      <p id="cc-error" class="alert alert-bad small" role="alert" hidden></p>
+      <div class="actions end">
+        <button value="cancel" class="btn btn-ghost" formnovalidate>Cancel</button>
+        <button id="cc-confirm" value="confirm" class="btn btn-primary">Confirm campaign</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Campaign action confirmation (start live sending, cancel) -->
+  <dialog id="action-dialog" aria-labelledby="ad-title">
+    <form method="dialog" class="dialog-body">
+      <h2 id="ad-title" class="dialog-title"></h2>
+      <p id="ad-body" class="small"></p>
+      <div class="actions end">
+        <button value="cancel" class="btn btn-ghost" autofocus>Back</button>
+        <button value="confirm" class="btn btn-primary" id="ad-confirm"></button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Unsaved editor changes -->
+  <dialog id="discard-dialog" aria-labelledby="discard-title">
+    <form method="dialog" class="dialog-body">
+      <h2 id="discard-title" class="dialog-title">Discard unsaved changes?</h2>
+      <p class="small">You have unsaved edits to <strong id="dd-session"></strong>. They will be lost.</p>
+      <div class="actions end">
+        <button value="cancel" class="btn btn-ghost" autofocus>Keep editing</button>
+        <button value="confirm" class="btn btn-primary">Discard changes</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

@@ -1,0 +1,18 @@
+# Never upload local data, secrets or development-only files to Vercel.
+# (The function bundle includes only what api/handler.js imports; static
+# files come from public/.)
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+!.env.example
+node_modules/
+test/
+docs/
+scripts/
+migrations/
+Dockerfile
+.dockerignore
+.git/

@@ -1,0 +1,20 @@
+-- ⛔ DESTRUCTIVE — REMOVES MIGRATION 0002 AND ALL CAMPAIGN AND UNSUBSCRIBE DATA.
+-- Reference only: every statement is commented out on purpose.
+--
+-- Safe ONLY before any real campaign was confirmed. After that, dropping
+-- these tables destroys campaign history, recipient outcomes and — worst —
+-- the suppression list (people who unsubscribed would be emailed again).
+-- Prefer fixing forward with a new migration. If you must roll back after
+-- real use, first export mailer.suppressions and keep it.
+--
+-- The app keeps running on schema version 1 (campaigns are then reported
+-- unavailable). Run as the schema owner, after approval:
+--
+--   begin;
+--   drop table if exists mailer.campaign_recipients;
+--   drop table if exists mailer.suppressions;
+--   drop table if exists mailer.campaigns;
+--   drop function if exists mailer.campaigns_guard(), mailer.campaigns_complete_list(),
+--     mailer.campaign_recipients_insert_guard(), mailer.campaign_recipients_guard();
+--   delete from mailer.schema_migrations where version = 2;
+--   commit;

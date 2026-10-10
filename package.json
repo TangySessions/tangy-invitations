@@ -1,0 +1,30 @@
+{
+  "name": "tangy-custom-email-sender",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tangy Sessions — Invitation Sender. Four independently configured session templates, sent to one recipient at a time through Resend.",
+  "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/server.js",
+    "dev": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --watch src/server.js",
+    "admin:create": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning scripts/admin.js create",
+    "admin:reset-password": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning scripts/admin.js reset-password",
+    "admin:disable": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning scripts/admin.js disable",
+    "admin:enable": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning scripts/admin.js enable",
+    "admin:list": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning scripts/admin.js list",
+    "check": "node --check src/server.js && node --check src/app.js && node --check src/db.js && node --check src/auth.js && node --check src/resend.js && node --check src/templatePolicy.js && node --check src/config.js && node --check src/store/index.js && node --check src/store/postgres.js && node --check src/store/pgConfig.js && node --check src/store/pgMigrate.js && node --check src/store/sendClaim.js && node --check public/app.js && node --check scripts/admin.js && node --check scripts/check-secrets.js && node --check scripts/db-migrate.js && node --check scripts/pg-test-db.js && node --check src/vercel.js && node --check api/handler.js && node --check src/store/scram.js && node --check src/store/pgCheck.js && node --check src/csvImport.js && node --check src/campaigns.js && node --check src/unsubscribe.js && node --check src/preflight.js && node --check scripts/preflight.js && node --check src/store/campaignRules.js && node --check scripts/scram-verifier.js && node --check scripts/db-check.js && npm run check:secrets",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/*.test.js\"",
+    "check:secrets": "node scripts/check-secrets.js",
+    "preflight": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning scripts/preflight.js",
+    "db:migrate": "node --env-file-if-exists=.env scripts/db-migrate.js",
+    "pg:test:up": "node scripts/pg-test-db.js up",
+    "pg:test:down": "node scripts/pg-test-db.js down",
+    "test:pg": "node --env-file=.env.pgtest --disable-warning=ExperimentalWarning --test --test-concurrency=2 --test-timeout=120000 \"test/pg/*.test.js\" test/app.test.js test/phase1.test.js test/sends.test.js test/vercel.test.js test/campaigns.test.js"
+  },
+  "dependencies": {
+    "pg": "8.23.1"
+  }
+}

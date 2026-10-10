@@ -1,0 +1,20 @@
+-- ⛔ DESTRUCTIVE — DELETES THE APP'S SCHEMA, DATA AND ROLES. Reference only.
+-- Every statement is commented out on purpose. Use only on this dedicated
+-- project, only before real data exists (or after exporting it), and only
+-- with explicit approval. It never touches anything outside schema "mailer"
+-- and the two app roles.
+--
+-- Step back from the runtime role only (keeps schema and data):
+--   revoke mailer_runtime from mailer_app;
+--   drop role mailer_app;
+--
+-- Remove everything the app created (schema, tables, data, roles):
+--   begin;
+--   drop schema mailer cascade;          -- tables, data, policies, schema_migrations
+--   drop role if exists mailer_app;
+--   drop role if exists mailer_runtime;  -- after the schema is gone, it owns/has nothing
+--   commit;
+--
+-- Credential problems (no data loss):
+--   alter role mailer_app password '<NEW_SCRAM_VERIFIER>';   -- rotate the runtime password
+--   (the postgres password: Supabase dashboard → Database settings → reset)
