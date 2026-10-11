@@ -468,6 +468,7 @@ function showPreview(p, source) {
   $('pv-session').textContent = `${p.session_label} (${p.session_id})`;
   $('pv-from').textContent = p.from || '(EMAIL_FROM not set)';
   $('pv-to').textContent = `${p.name} <${p.to}>`;
+  $('pv-people').textContent = String(p.people ?? 1);
   $('pv-subject').textContent = p.subject;
   $('pv-source').textContent = source;
   $('preview-meta').hidden = false;
@@ -490,7 +491,7 @@ function invalidatePreview(sessionId = null) {
 async function previewDraft() {
   if (!state.editing) return;
   const { active, ...draft } = readDraft(); // a preview needs only the template fields
-  const body = { session_id: state.editing.id, source: 'draft', draft, name: $('rcpt-name').value, email: $('rcpt-email').value };
+  const body = { session_id: state.editing.id, source: 'draft', draft, name: $('rcpt-name').value, email: $('rcpt-email').value, people: readPeople() ?? 1 };
   const tooBig = templateSizeProblems(body);
   if (tooBig) { showIssues(tooBig, 'Too large to preview'); return; }
   const btn = $('tpl-preview');
@@ -507,8 +508,8 @@ async function previewDraft() {
   }
 }
 
-async function previewSaved(sessionId, { test = false, email = $('rcpt-email').value, name = $('rcpt-name').value } = {}) {
-  const p = await api('POST', '/api/preview', { session_id: sessionId, source: 'saved', name, email, test });
+async function previewSaved(sessionId, { test = false, email = $('rcpt-email').value, name = $('rcpt-name').value, people = readPeople() ?? 1 } = {}) {
+  const p = await api('POST', '/api/preview', { session_id: sessionId, source: 'saved', name, email, test, people });
   showPreview(p, `Saved template v${p.template_version}${test ? ' — TEST' : ''}`);
   return p;
 }
@@ -534,7 +535,7 @@ function fieldError(inputId, message) {
 function previewIsCurrent() {
   const p = state.preview;
   const s = selectedSession();
-  return !!(p && s && p.sessionId === s.id && p.version === s.version && p.name === norm($('rcpt-name').value) && p.email === $('rcpt-email').value.trim());
+  return !!(p && s && p.sessionId === s.id && p.version === s.version && p.name === norm($('rcpt-name').value) && p.email === $('rcpt-email').value.trim() && p.people === readPeople());
 }
 
 function renderSendState() {
@@ -559,12 +560,20 @@ function renderSendState() {
   $('send-hint').textContent = usable && !current ? 'Preview the invitation for this recipient before sending.' : '';
 }
 
+// Number of people: a whole number 1–50 (the server checks it again).
+const PEOPLE_MAX = 50;
+function readPeople() {
+  const raw = $('rcpt-people').value.trim();
+  return /^\d+$/.test(raw) && Number(raw) >= 1 && Number(raw) <= PEOPLE_MAX ? Number(raw) : null;
+}
+
 function validateRecipientLocally() {
   const name = $('rcpt-name').value.trim();
   const email = $('rcpt-email').value.trim();
   fieldError('rcpt-name', name ? '' : 'Enter the recipient name.');
   fieldError('rcpt-email', !email ? 'Enter the recipient email address.' : /[,;\s<>]/.test(email) || !/^[^@]+@[^@]+\.[^@]+$/.test(email) ? 'Enter exactly one valid email address.' : '');
-  return name && !$('rcpt-email-err').textContent;
+  fieldError('rcpt-people', readPeople() ? '' : `Enter a whole number from 1 to ${PEOPLE_MAX}.`);
+  return name && !$('rcpt-email-err').textContent && readPeople() !== null;
 }
 
 async function previewInvitation() {
@@ -573,13 +582,14 @@ async function previewInvitation() {
   try {
     const p = await previewSaved(s.id);
     state.preview = p.preview_token
-      ? { sessionId: p.session_id, label: p.session_label, version: p.template_version, name: norm($('rcpt-name').value), email: $('rcpt-email').value.trim(), token: p.preview_token, data: p }
+      ? { sessionId: p.session_id, label: p.session_label, version: p.template_version, name: norm($('rcpt-name').value), email: $('rcpt-email').value.trim(), people: p.people, token: p.preview_token, data: p }
       : null;
   } catch (err) {
     state.preview = null;
     if (err.data?.fields) {
       fieldError('rcpt-name', err.data.fields.name);
       fieldError('rcpt-email', err.data.fields.email);
+      fieldError('rcpt-people', err.data.fields.people);
     } else if (err.status !== 401) showResult('bad', err.message);
     if (err.data?.code === 'no_template' || err.data?.code === 'session_inactive') loadSessions();
   }
@@ -603,6 +613,7 @@ async function confirmAttempt(attempt, p) {
   $('cf-session').textContent = `${p.session_label} (Session ${attempt.sessionId.slice(1)})`;
   $('cf-name').textContent = attempt.name;
   $('cf-email').textContent = attempt.email;
+  $('cf-people').textContent = String(attempt.people);
   $('cf-subject').textContent = p.subject;
   $('cf-from').textContent = p.from || '(not configured)';
   $('cf-version').textContent = `Saved template v${attempt.version}`;
@@ -614,7 +625,7 @@ async function startRealSend(e) {
   e?.preventDefault();
   if (state.sending || !previewIsCurrent()) { renderSendState(); return; }
   const p = state.preview;
-  const attempt = { kind: 'real', sessionId: p.sessionId, label: p.label, name: p.name, email: p.email, version: p.version, token: p.token, key: crypto.randomUUID() };
+  const attempt = { kind: 'real', sessionId: p.sessionId, label: p.label, name: p.name, email: p.email, people: p.people, version: p.version, token: p.token, key: crypto.randomUUID() };
   if (!(await confirmAttempt(attempt, p.data))) return;
   if (!previewIsCurrent()) { renderSendState(); return; }
   await doSend(attempt);
@@ -633,14 +644,15 @@ async function startTestSend() {
     showResult('bad', 'Test not sent: enter exactly one valid test email address.');
     return;
   }
+  const people = readPeople() ?? 1;
   let p;
   try {
-    p = await previewSaved(s.id, { test: true, email });
+    p = await previewSaved(s.id, { test: true, email, people });
   } catch (err) {
     if (err.status !== 401) showResult('bad', `Test not sent. ${err.message}`);
     return;
   }
-  const attempt = { kind: 'test', sessionId: s.id, label: p.session_label, name: p.name, email: p.to, version: p.template_version, token: p.preview_token, key: crypto.randomUUID() };
+  const attempt = { kind: 'test', sessionId: s.id, label: p.session_label, name: p.name, email: p.to, people: p.people, version: p.template_version, token: p.preview_token, key: crypto.randomUUID() };
   if (!(await confirmAttempt(attempt, p))) return;
   await doSend(attempt);
 }
@@ -651,11 +663,11 @@ async function doSend(attempt) {
   renderSendState();
   const test = attempt.kind === 'test';
   showResult('info', test ? `Sending test of ${attempt.label} to ${attempt.email}…` : `Sending ${attempt.label} to ${attempt.email}…`);
-  const body = { session_id: attempt.sessionId, email: attempt.email, template_version: attempt.version, preview_token: attempt.token, idempotency_key: attempt.key };
+  const body = { session_id: attempt.sessionId, email: attempt.email, people: attempt.people, template_version: attempt.version, preview_token: attempt.token, idempotency_key: attempt.key };
   if (!test) body.name = attempt.name;
   try {
     const r = await api('POST', test ? '/api/send-test' : '/api/send', body, { timeoutMs: 45_000 });
-    const rows = [['Session', r.session_label], ['To', r.to], ['Subject', r.subject], ['From', r.from || '']];
+    const rows = [['Session', r.session_label], ['To', r.to], ['Number of people', String(r.people)], ['Subject', r.subject], ['From', r.from || '']];
     if (r.status === 'dry_run') {
       showResult('dry', 'DRY RUN — nothing was sent. The email rendered and passed every check; Resend was not called.', rows);
     } else {
@@ -666,6 +678,7 @@ async function doSend(attempt) {
       // Keep the selected session and every template; clear only the recipient.
       $('rcpt-name').value = '';
       $('rcpt-email').value = '';
+      $('rcpt-people').value = '1';
       state.preview = null;
       if (state.shown && !state.shown.test) $('preview-stale').hidden = false;
       $('rcpt-name').focus();
@@ -689,7 +702,7 @@ function handleSendError(err, attempt) {
       type: 'button', class: 'btn btn-sm',
       onclick: async () => {
         try {
-          const p = await previewSaved(attempt.sessionId, attempt.kind === 'test' ? { test: true, email: attempt.email } : { name: attempt.name, email: attempt.email });
+          const p = await previewSaved(attempt.sessionId, attempt.kind === 'test' ? { test: true, email: attempt.email, people: attempt.people } : { name: attempt.name, email: attempt.email, people: attempt.people });
           if (p.template_version !== attempt.version || !p.preview_token) {
             showResult('bad', 'The template changed since this attempt. Start a new send instead of retrying.');
             return;
@@ -778,9 +791,11 @@ function renderReview() {
   state.reviewPage = Math.min(state.reviewPage, pages - 1);
   const slice = r.recipients.slice(state.reviewPage * REVIEW_PAGE_SIZE, (state.reviewPage + 1) * REVIEW_PAGE_SIZE);
   $('review-rows').replaceChildren(...(slice.length ? slice.map((x) => el('tr', { 'aria-current': String(r.preview?.row === x.row) },
-    el('td', {}, String(x.row)), el('td', {}, x.name), el('td', {}, x.email),
-    el('td', {}, el('button', { type: 'button', class: 'btn btn-ghost btn-sm', onclick: () => runReview(x.row), 'aria-label': `Preview row ${x.row}` }, 'Preview'))))
-    : [el('tr', {}, el('td', { colspan: '4', class: 'muted' }, 'No valid recipients.'))]));
+    el('td', {}, String(x.row)), el('td', {}, x.name), el('td', {}, String(x.people)), el('td', {}, x.email),
+    el('td', {},
+      el('button', { type: 'button', class: 'btn btn-ghost btn-sm', onclick: () => runReview(x.row), 'aria-label': `Preview row ${x.row}` }, 'Preview'),
+      el('button', { type: 'button', class: 'btn btn-ghost btn-sm', onclick: () => useInSendForm(x), 'aria-label': `Use row ${x.row} in Send Invitation` }, 'Use in Send Invitation'))))
+    : [el('tr', {}, el('td', { colspan: '5', class: 'muted' }, 'No valid recipients.'))]));
   $('review-page').textContent = `Page ${state.reviewPage + 1} of ${pages}`;
   $('review-prev').disabled = state.reviewPage === 0;
   $('review-next').disabled = state.reviewPage >= pages - 1;
@@ -810,12 +825,15 @@ function renderReview() {
     '. Confirming would email them again — remove them from the CSV if that is not intended.',
   ] : []));
   const available = r.campaigns?.available !== false;
-  const canConfirm = available && r.counts.valid > 0 && r.session_active;
+  // Campaigns cannot store people counts yet (the server refuses too).
+  const multi = r.recipients.filter((x) => x.people !== 1).length;
+  const canConfirm = available && r.counts.valid > 0 && r.session_active && !multi;
   $('review-confirm').disabled = !canConfirm;
   $('review-unavailable').hidden = canConfirm;
   $('review-unavailable').textContent = !available ? r.campaigns.reason
     : !r.session_active ? 'Turn this session on for sending before confirming a campaign.'
-      : r.counts.valid === 0 ? 'No valid recipients to confirm.' : '';
+      : r.counts.valid === 0 ? 'No valid recipients to confirm.'
+        : multi ? `${multi} recipient${multi === 1 ? ' has' : 's have'} more than 1 person. Campaigns cannot store people counts yet — send these one at a time with “Use in Send Invitation”.` : '';
   $('review-out').hidden = false;
 }
 
@@ -1088,6 +1106,23 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && state.campaign?.data?.status === 'sending' && !state.pump) schedulePump(0);
 });
 
+// Copies one reviewed row (exactly as the server parsed it) into the Send
+// Invitation form, with the same session, then asks for a fresh preview.
+function useInSendForm(x) {
+  const sessionId = state.review?.session_id;
+  if (sessionId && sessionById(sessionId)) $('send-session').value = sessionId;
+  $('rcpt-name').value = x.name;
+  $('rcpt-email').value = x.email;
+  $('rcpt-people').value = String(x.people);
+  for (const id of ['rcpt-name', 'rcpt-email', 'rcpt-people']) fieldError(id, '');
+  invalidatePreview();
+  $('send-result').hidden = true;
+  setActiveNav('send');
+  $('send').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  $('send-hint').textContent = `Row ${x.row} copied from the reviewed list. Preview the invitation, then send.`;
+  $('send-preview').focus({ preventScroll: true });
+}
+
 function clearReview() {
   state.review = null;
   state.reviewPage = 0;
@@ -1174,7 +1209,7 @@ $('send-form').addEventListener('submit', startRealSend);
 $('send-session').addEventListener('change', () => { invalidatePreview(); $('send-result').hidden = true; });
 $('send-preview').addEventListener('click', previewInvitation);
 $('send-test').addEventListener('click', startTestSend);
-for (const id of ['rcpt-name', 'rcpt-email']) {
+for (const id of ['rcpt-name', 'rcpt-email', 'rcpt-people']) {
   $(id).addEventListener('input', () => {
     fieldError(id, '');
     if (state.preview && !previewIsCurrent()) invalidatePreview();

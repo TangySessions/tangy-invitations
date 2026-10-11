@@ -833,7 +833,7 @@ test('list review: counts, recipients, problems, template snapshot, sender and a
     assert.equal(r.status, 200, JSON.stringify(r.data));
     const d = r.data;
     assert.deepEqual(d.counts, { total: 5, valid: 2, invalid: 1, duplicate: 1, blank: 1, skipped: 3 });
-    assert.deepEqual(d.recipients, [{ row: 2, name: 'Asha', email: 'asha@example.com' }, { row: 3, name: 'Doe, Jane', email: 'jane@example.com' }]);
+    assert.deepEqual(d.recipients, [{ row: 2, name: 'Asha', email: 'asha@example.com', people: 1 }, { row: 3, name: 'Doe, Jane', email: 'jane@example.com', people: 1 }]);
     assert.deepEqual(d.problems.map((p) => [p.row, p.kind]), [[4, 'invalid'], [5, 'duplicate'], [6, 'blank']]);
     assert.equal(d.template_version, saved.version);
     assert.match(d.template_hash, /^[0-9a-f]{64}$/);
@@ -1065,5 +1065,112 @@ test('templates saved with a separate CSS field still render the same; re-saving
     // Campaign previews are the same document plus the server-added unsubscribe footer.
     assert.ok(review2.preview.html.includes('<style type="text/css">\nh1{color:#123456}\n</style>\n</head>'));
     assert.equal(review2.preview.html.replace(/<table role="presentation" width="100%"[^]*?Unsubscribe<\/a> from future invitations\.<\/td><\/tr><\/table>\n/, ''), before.data.html);
+  } finally { await t.close(); }
+});
+
+// ---------------------------------------------------- number of people ---
+// Send Invitation step 2: a whole number 1–50 ({{number_of_people}}),
+// default 1, bound into the signed preview so preview and send always agree.
+const peoplePreview = (t, s, extra = {}) => t.call('POST', '/api/preview', { session_id: 's1', source: 'saved', name: 'Asha', email: 'asha@example.com', ...extra }, s);
+const peopleSend = (p, extra = {}) => ({ session_id: 's1', name: 'Asha', email: 'asha@example.com', template_version: p.template_version, preview_token: p.preview_token, idempotency_key: randomUUID(), ...extra });
+
+test('number of people: shown in the preview and the sent email; default 1 when not supplied', async () => {
+  const t = await boot();
+  try {
+    const s = await t.login();
+    await saveSession(t, s, 's1', TICKET);
+    const p = (await peoplePreview(t, s, { people: 3 })).data;
+    assert.equal(p.people, 3);
+    assert.ok(p.html.includes('<td><b>NUMBER OF PEOPLE</b></td><td align="right"><b>3</b></td>'));
+    assert.ok(p.html.includes('HEY Asha,'), '{{recipient_name}} still personalized');
+    const r = await t.call('POST', '/api/send', peopleSend(p, { people: 3 }), s);
+    assert.deepEqual([r.status, r.data.people], [200, 3]);
+    const sent = t.resend.sends()[0].body;
+    assert.ok(sent.html.includes('<b>NUMBER OF PEOPLE</b></td><td align="right"><b>3</b>'), 'the value reached the provider');
+    // Clients that do not send the field keep working: 1 everywhere.
+    const d = (await peoplePreview(t, s, { email: 'ben@example.com', name: 'Ben' })).data;
+    assert.equal(d.people, 1);
+    assert.ok(d.html.includes('<b>NUMBER OF PEOPLE</b></td><td align="right"><b>1</b>'));
+    const r2 = await t.call('POST', '/api/send', peopleSend(d, { name: 'Ben', email: 'ben@example.com' }), s);
+    assert.deepEqual([r2.status, r2.data.people], [200, 1]);
+  } finally { await t.close(); }
+});
+
+test('number of people: only whole numbers 1–50, checked on preview and on send', async () => {
+  const t = await boot();
+  try {
+    const s = await t.login();
+    await saveSession(t, s, 's1', TICKET);
+    const ok = (await peoplePreview(t, s, { people: 2 })).data;
+    for (const bad of [0, -1, 1.5, 51, '3', '', true, [2], { n: 2 }]) {
+      const r = await peoplePreview(t, s, { people: bad });
+      assert.equal(r.status, 400, `preview ${JSON.stringify(bad)}`);
+      assert.match(r.data.fields.people, /whole number from 1 to 50/);
+      const sr = await t.call('POST', '/api/send', peopleSend(ok, { people: bad }), s);
+      assert.equal(sr.status, 400, `send ${JSON.stringify(bad)}`);
+    }
+    for (const good of [1, 50]) assert.equal((await peoplePreview(t, s, { people: good })).data.people, good);
+    assert.equal(t.resend.sends().length, 0);
+  } finally { await t.close(); }
+});
+
+test('number of people is bound to the signed preview: a different count (or a dropped field) cannot be sent', async () => {
+  const t = await boot();
+  try {
+    const s = await t.login();
+    await saveSession(t, s, 's1', TICKET);
+    const p = (await peoplePreview(t, s, { people: 4 })).data;
+    for (const changed of [{ people: 5 }, { people: 1 }, {}]) {
+      const r = await t.call('POST', '/api/send', peopleSend(p, changed), s);
+      assert.deepEqual([r.status, r.data.code], [409, 'preview_required'], JSON.stringify(changed));
+    }
+    assert.equal(t.resend.sends().length, 0, 'nothing sent with a count that was not previewed');
+    assert.equal((await t.call('POST', '/api/send', peopleSend(p, { people: 4 }), s)).status, 200);
+  } finally { await t.close(); }
+});
+
+test('number of people: test emails carry it too; the placeholder is accepted, unknown ones still are not', async () => {
+  const t = await boot();
+  try {
+    const s = await t.login();
+    await saveSession(t, s, 's1', TICKET);
+    const p = (await t.call('POST', '/api/preview', { session_id: 's1', source: 'saved', email: 'me@example.com', test: true, people: 6 }, s)).data;
+    const r = await t.call('POST', '/api/send-test', { session_id: 's1', email: 'me@example.com', people: 6, template_version: p.template_version, preview_token: p.preview_token, idempotency_key: randomUUID() }, s);
+    assert.deepEqual([r.status, r.data.people, r.data.test], [200, 6, true]);
+    assert.ok(t.resend.sends()[0].body.html.includes('<b>NUMBER OF PEOPLE</b></td><td align="right"><b>6</b>'));
+    const bad = await t.call('PUT', '/api/sessions/s2', { ...TICKET, html: TICKET.html.replace('{{number_of_people}}', '{{guest_count}}'), expected_version: 0 }, s);
+    assert.equal(bad.status, 422);
+    assert.ok(bad.data.issues.some((i) => /Unknown placeholder \{\{guest_count\}\}/.test(i.message)));
+    // A subject may use it as well.
+    await saveSession(t, s, 's3', { ...TICKET, subject: 'Your invite for {{number_of_people}}, {{recipient_name}}' });
+    const sp = (await t.call('POST', '/api/preview', { session_id: 's3', source: 'saved', name: 'Asha', email: 'asha@example.com', people: 2 }, s)).data;
+    assert.equal(sp.subject, 'Your invite for 2, Asha');
+  } finally { await t.close(); }
+});
+
+test('CSV name,people,email: every row reaches its own invitation with the right name, people count and email', async () => {
+  const t = await boot();
+  try {
+    const s = await t.login();
+    await saveSession(t, s, 's1', TICKET);
+    const csv = readFileSync(new URL('../templates/recipients-sample.csv', import.meta.url), 'utf8');
+    const rv = (await t.call('POST', '/api/campaigns/review', { session_id: 's1', csv }, s)).data;
+    assert.deepEqual(rv.recipients.map((x) => [x.row, x.name, x.people, x.email]), [
+      [2, 'Deepa', 3, 'deepa@example.com'], [3, 'Komal', 1, 'komal@example.com'], [4, 'Rahul', 4, 'rahul@example.com'], [5, 'Doe, Jane', 2, 'jane@example.com']]);
+    for (const x of rv.recipients) {
+      // The review preview of that row shows its count…
+      const rowPreview = (await t.call('POST', '/api/campaigns/review', { session_id: 's1', csv, preview_row: x.row }, s)).data.preview;
+      assert.ok(rowPreview.html.includes(`<b>NUMBER OF PEOPLE</b></td><td align="right"><b>${x.people}</b>`), `row ${x.row} review preview`);
+      // …and "Use in Send Invitation" → preview → send carries the same values to the provider.
+      const p = (await t.call('POST', '/api/preview', { session_id: 's1', source: 'saved', name: x.name, email: x.email, people: x.people }, s)).data;
+      const r = await t.call('POST', '/api/send', { session_id: 's1', name: x.name, email: x.email, people: x.people, template_version: p.template_version, preview_token: p.preview_token, idempotency_key: randomUUID() }, s);
+      assert.deepEqual([r.status, r.data.to, r.data.people], [200, x.email, x.people], `row ${x.row}`);
+      const sent = t.resend.sends().at(-1).body;
+      assert.deepEqual(sent.to, [x.email]);
+      assert.ok(sent.html.includes(`HEY ${x.name},`) && sent.html.includes(`<td align="right">${x.email}</td>`), `row ${x.row} name and email`);
+      assert.ok(sent.html.includes(`<b>NUMBER OF PEOPLE</b></td><td align="right"><b>${x.people}</b>`), `row ${x.row} people`);
+    }
+    assert.equal(t.resend.sends().length, 4);
+    // (Campaign confirmation of this list: test/campaigns.test.js.)
   } finally { await t.close(); }
 });

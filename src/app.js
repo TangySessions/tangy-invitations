@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import {
   validateTemplate, validateRecipient, validateEmailAddress, validateSessionName, renderEmail,
-  noTemplateMessage, TEST_RECIPIENT_NAME, PLACEHOLDERS, LIMITS, liveImageProblem, GMAIL_CLIP_BYTES,
+  noTemplateMessage, TEST_RECIPIENT_NAME, PLACEHOLDERS, LIMITS, liveImageProblem, GMAIL_CLIP_BYTES, validatePeople, PEOPLE,
 } from './templatePolicy.js';
 import { SESSION_IDS, defaultLabel } from './db.js';
 import {
@@ -252,12 +252,13 @@ export function createApp({ config, db, fetchImpl = fetch, now = Date.now, log =
   // Preview tokens: an HMAC (keyed with PREVIEW_TOKEN_SECRET) over exactly
   // what the admin previewed. /api/send requires one that matches the
   // session, the template version and the recipient, so any change after
-  // previewing — a template save, another session, other recipient details —
+  // previewing — a template save, another session, other recipient details
+  // (name, email or number of people) —
   // forces a new preview. Valid for 30 minutes. Changing the secret (or, in
   // development without one, restarting) invalidates outstanding previews.
   function previewToken(f, issuedAt = now()) {
     const mac = createHmac('sha256', previewKey)
-      .update(JSON.stringify([f.adminId, f.sessionId, f.version, !!f.test, f.name, f.email, issuedAt]))
+      .update(JSON.stringify([f.adminId, f.sessionId, f.version, !!f.test, f.name, f.email, f.people ?? PEOPLE.def, issuedAt]))
       .digest('base64url');
     return `${issuedAt}.${mac}`;
   }
@@ -373,7 +374,7 @@ export function createApp({ config, db, fetchImpl = fetch, now = Date.now, log =
     checkOrigin(req);
     const session = await requireSession(req, { mutating: true });
     const body = await readJson(req, LIMIT_TEMPLATE_IMPORT, TEMPLATE_SIZE_HINT);
-    onlyFields(body, ['session_id', 'source', 'draft', 'name', 'email', 'test']);
+    onlyFields(body, ['session_id', 'source', 'draft', 'name', 'email', 'test', 'people']);
     const sessionId = sessionIdOf(body.session_id);
     let template;
     let label;
@@ -403,8 +404,10 @@ export function createApp({ config, db, fetchImpl = fetch, now = Date.now, log =
     const name = test ? TEST_RECIPIENT_NAME : (hasName ? body.name : 'Recipient Name');
     const email = hasEmail ? body.email : 'recipient@example.com';
     const v = validateRecipient({ name, email });
-    if (v.errors) throw new HttpError(400, 'Check the recipient details.', { fields: v.errors });
-    const rendered = renderEmail(template, v.recipient, { test });
+    const pp = validatePeople(body.people);
+    if (v.errors || pp.error) throw new HttpError(400, 'Check the recipient details.', { fields: { ...v.errors, ...(pp.error ? { people: pp.error } : {}) } });
+    const recipient = { ...v.recipient, people: pp.people };
+    const rendered = renderEmail(template, recipient, { test });
     if (rendered.errors) throw new HttpError(422, 'This recipient produces an email that fails validation.', { issues: rendered.errors });
 
     // Only a preview of the SAVED, sendable template for a real recipient
@@ -413,11 +416,11 @@ export function createApp({ config, db, fetchImpl = fetch, now = Date.now, log =
     send(res, 200, {
       session_id: sessionId, session_label: label, source: body.source,
       subject: rendered.subject, html: restore(rendered.html), text: rendered.text ?? null,
-      to: v.recipient.email, name: v.recipient.name, from: config.email.sender?.display ?? null,
+      to: v.recipient.email, name: v.recipient.name, people: pp.people, from: config.email.sender?.display ?? null,
       template_version: body.source === 'saved' ? template.version : null,
       test, issues,
       preview_token: sendable
-        ? previewToken({ adminId: session.adminId, sessionId, version: template.version, test, name: v.recipient.name, email: v.recipient.email })
+        ? previewToken({ adminId: session.adminId, sessionId, version: template.version, test, name: v.recipient.name, email: v.recipient.email, people: pp.people })
         : null,
     });
   }
@@ -490,8 +493,8 @@ export function createApp({ config, db, fetchImpl = fetch, now = Date.now, log =
     const session = await requireSession(req, { mutating: true });
     const body = await readJson(req, LIMIT_SMALL_BODY);
     onlyFields(body, test
-      ? ['session_id', 'email', 'template_version', 'preview_token', 'idempotency_key']
-      : ['session_id', 'name', 'email', 'template_version', 'preview_token', 'idempotency_key']);
+      ? ['session_id', 'email', 'people', 'template_version', 'preview_token', 'idempotency_key']
+      : ['session_id', 'name', 'email', 'people', 'template_version', 'preview_token', 'idempotency_key']);
     const sessionId = sessionIdOf(body.session_id);
 
     let recipient;
@@ -504,6 +507,9 @@ export function createApp({ config, db, fetchImpl = fetch, now = Date.now, log =
       if (v.errors) throw new HttpError(400, 'Check the recipient details.', { fields: v.errors });
       recipient = v.recipient;
     }
+    const pp = validatePeople(body.people);
+    if (pp.error) throw new HttpError(400, pp.error, { fields: { people: pp.error } });
+    recipient = { ...recipient, people: pp.people };
     if (typeof body.idempotency_key !== 'string' || !UUID_RE.test(body.idempotency_key)) throw new HttpError(400, 'Missing send id. Reload the page.');
     const key = body.idempotency_key.toLowerCase();
 
@@ -516,7 +522,7 @@ export function createApp({ config, db, fetchImpl = fetch, now = Date.now, log =
     if (body.template_version !== template.version) {
       throw new HttpError(409, `${template.label}'s template changed (now version ${template.version}) after you reviewed it. Preview again before sending.`, { code: 'template_changed', current_version: template.version });
     }
-    if (!previewTokenValid(body.preview_token, { adminId: session.adminId, sessionId, version: template.version, test, name: recipient.name, email: recipient.email })) {
+    if (!previewTokenValid(body.preview_token, { adminId: session.adminId, sessionId, version: template.version, test, name: recipient.name, email: recipient.email, people: recipient.people })) {
       throw new HttpError(409, 'Preview this exact email again before sending (the session, template or recipient changed since the last preview, or the preview expired).', { code: 'preview_required' });
     }
     const saved = validateTemplate(template);
@@ -540,7 +546,7 @@ export function createApp({ config, db, fetchImpl = fetch, now = Date.now, log =
     }
 
     const t = now();
-    const common = { session_id: sessionId, session_label: template.label, to: recipient.email, subject: rendered.subject, from: state.from, test };
+    const common = { session_id: sessionId, session_label: template.label, to: recipient.email, people: recipient.people, subject: rendered.subject, from: state.from, test };
     // Atomically claim this send id before calling Resend (both stores; see
     // src/store/sendClaim.js). Only 'claimed' and 'reclaimed' may send.
     const claim = await db.claimSend({

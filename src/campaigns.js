@@ -137,6 +137,13 @@ export function createCampaignRoutes(ctx) {
       throw new HttpError(409, 'The recipient list is not the one you reviewed. Review it again before confirming.', { code: 'list_changed' });
     }
     if (review.counts.valid === 0) throw new HttpError(422, 'The list has no valid recipients.', { code: 'no_recipients' });
+    // Campaign recipients store name and email only (no people column), so a
+    // list with per-recipient people counts cannot be sent as a campaign yet:
+    // refuse rather than silently send "1". (Needs an approved schema change.)
+    const multi = review.recipients.filter((r) => r.people !== 1);
+    if (multi.length) {
+      throw new HttpError(422, `${multi.length} recipient${multi.length === 1 ? ' has' : 's have'} a number of people other than 1 (first: row ${multi[0].row}). Campaigns cannot store people counts yet — send these invitations one at a time with "Use in Send Invitation", or use a list where every People value is 1.`, { code: 'people_not_supported', rows: multi.slice(0, 50).map((r) => r.row) });
+    }
     if (body.confirm_count !== review.counts.valid) {
       throw new HttpError(400, `Type the number of recipients (${review.counts.valid}) to confirm.`, { code: 'confirm_count' });
     }

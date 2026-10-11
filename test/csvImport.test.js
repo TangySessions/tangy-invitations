@@ -16,7 +16,7 @@ test('valid CSV in either column order; header case-insensitive with spaces; lea
     '\uFEFFName , EMAIL\r\nAsha,asha@example.com\r\nBen,ben@example.com\r\n',
   ]) {
     const r = reviewCsv(text);
-    assert.deepEqual(r.recipients, [{ row: 2, name: 'Asha', email: 'asha@example.com' }, { row: 3, name: 'Ben', email: 'ben@example.com' }], JSON.stringify(text));
+    assert.deepEqual(r.recipients, [{ row: 2, name: 'Asha', email: 'asha@example.com', people: 1 }, { row: 3, name: 'Ben', email: 'ben@example.com', people: 1 }], JSON.stringify(text));
     assert.deepEqual(r.counts, { total: 2, valid: 2, invalid: 0, duplicate: 0, blank: 0, skipped: 0 });
     assert.deepEqual(r.problems, []);
   }
@@ -119,4 +119,52 @@ test('template content hash changes with any content field, not with metadata', 
   assert.match(h, /^[0-9a-f]{64}$/);
   assert.equal(templateContentHash({ ...t, version: 9, label: 'Other' }), h);
   for (const k of ['subject', 'html', 'css', 'text']) assert.notEqual(templateContentHash({ ...t, [k]: `${t[k]} ` }), h, k);
+});
+
+// ----------------------------------------------------- name,people,email ---
+test('name,people,email: each row maps to its own name, people count and email', () => {
+  const r = reviewCsv('name,people,email\nDeepa,3,deepa@tangysessions.com\nKomal,1,komal@tangysessions.com\nRahul,4,rahul@example.com\n');
+  assert.equal(r.format, 'name,people,email');
+  assert.deepEqual(r.recipients, [
+    { row: 2, name: 'Deepa', email: 'deepa@tangysessions.com', people: 3 },
+    { row: 3, name: 'Komal', email: 'komal@tangysessions.com', people: 1 },
+    { row: 4, name: 'Rahul', email: 'rahul@example.com', people: 4 },
+  ]);
+  assert.deepEqual(r.problems, []);
+  // Case and spaces in the header are tolerated; quoted names with commas work.
+  const q = reviewCsv('﻿ Name , PEOPLE , Email \r\n"Doe, Jane", 2 ,jane@example.com\r\n');
+  assert.deepEqual(q.recipients, [{ row: 2, name: 'Doe, Jane', email: 'jane@example.com', people: 2 }]);
+  // The people count is part of the list fingerprint.
+  assert.notEqual(reviewCsv('name,people,email\nA,2,a@b.co').recipients_hash, reviewCsv('name,people,email\nA,3,a@b.co').recipients_hash);
+});
+
+test('people values: only whole numbers 1–50; zero, negatives, decimals, text and blanks are row errors', () => {
+  const rows = ['A,0,a@x.co', 'B,-2,b@x.co', 'C,1.5,c@x.co', 'D,three,d@x.co', 'E,,e@x.co', 'F,51,f@x.co', 'G,+2,g@x.co', 'H,2e1,h@x.co', 'I,1,i@x.co', 'J,50,j@x.co'];
+  const r = reviewCsv(`name,people,email\n${rows.join('\n')}\n`);
+  assert.deepEqual(r.recipients.map((x) => [x.name, x.people]), [['I', 1], ['J', 50]]);
+  assert.equal(r.counts.invalid, 8);
+  for (const p of r.problems) assert.match(p.message, /^People: (".*" is not|missing —) a whole number from 1 to 50\.$/);
+  assert.match(r.problems.find((p) => p.row === 4).message, /"1\.5" is not/);
+  // The people value is never taken as the email (and vice versa).
+  const swapped = reviewCsv('name,people,email\nA,a@x.co,3\n');
+  assert.equal(swapped.recipients.length, 0);
+  assert.match(swapped.problems[0].message, /People: "a@x\.co" is not a whole number.*Email:/);
+});
+
+test('header rules: name,people,email in that order; the older name,email still works; clear errors otherwise', () => {
+  const legacy = reviewCsv('email,name\na@x.co,A\n');
+  assert.deepEqual([legacy.format, legacy.recipients[0].people], ['name,email', 1], 'old files: 1 person each');
+  for (const [header, re] of [
+    ['name,email,people', /with a people column the header must be exactly name,people,email \(in that order\); found name,email,people/],
+    ['people,name,email', /must be exactly name,people,email/],
+    ['email,people,name', /must be exactly name,people,email/],
+    ['name,people', /missing the email column\. Use: name,people,email \(or the older name,email\)/],
+    ['people,email', /missing the name column/],
+    ['name,people,email,phone', /unexpected column "phone"/],
+    ['name,people,people,email', /"people" appears twice/],
+  ]) assert.throws(() => reviewCsv(`${header}\nA,1,a@x.co\n`), (err) => re.test(err.message), header);
+  const short = reviewCsv('name,people,email\nA,2\nB,1,b@x.co,extra\n');
+  assert.deepEqual(short.problems.map((p) => p.message), [
+    'Expected 3 columns (name, people, email); found 2. Quote any name that contains a comma.',
+    'Expected 3 columns (name, people, email); found 4. Quote any name that contains a comma.']);
 });

@@ -26,7 +26,20 @@
 // markup too. After personalization the final HTML is validated again, so a
 // recipient value can never introduce something the policy forbids.
 
-export const PLACEHOLDERS = Object.freeze(['recipient_name', 'recipient_email']);
+export const PLACEHOLDERS = Object.freeze(['recipient_name', 'recipient_email', 'number_of_people']);
+// "Number of people" on a single invitation ({{number_of_people}}): a whole
+// number; when not supplied (e.g. campaign emails) it is 1.
+export const PEOPLE = Object.freeze({ min: 1, max: 50, def: 1 });
+
+// Accepts only a JSON whole number in range (no strings, decimals, 0 or
+// negatives); undefined/null means the default. Returns { people } or { error }.
+export function validatePeople(value) {
+  if (value === undefined || value === null) return { people: PEOPLE.def };
+  if (!Number.isSafeInteger(value) || value < PEOPLE.min || value > PEOPLE.max) {
+    return { error: `Enter the number of people as a whole number from ${PEOPLE.min} to ${PEOPLE.max}.` };
+  }
+  return { people: value };
+}
 export const TEST_RECIPIENT_NAME = 'Test Recipient';
 export const TEST_SUBJECT_PREFIX = '[TEST] ';
 export const NO_TEMPLATE_MESSAGE = 'No email template has been configured yet. Configure and save the email template before sending.';
@@ -457,7 +470,7 @@ export function liveImageProblem(rendered) {
 
 // autoText: when the template has no plain text, derive it from the HTML.
 export function renderEmail(template, recipient, { test = false, autoText = false } = {}) {
-  const values = { recipient_name: recipient.name, recipient_email: recipient.email };
+  const values = { recipient_name: recipient.name, recipient_email: recipient.email, number_of_people: String(recipient.people ?? PEOPLE.def) };
   const plain = (v) => String(v).replace(/[\r\n]+/g, ' ');
   const subject = (test ? TEST_SUBJECT_PREFIX : '') + substitute(template.subject, values, plain);
   const html = injectCss(substitute(template.html, values, escapeHtml), template.css || '');

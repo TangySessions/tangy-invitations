@@ -184,6 +184,9 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .field-error { color: var(--bad); font-size: 13px; }
 .row-2 { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0 16px; }
 @media (min-width: 700px) { .row-2 { grid-template-columns: minmax(0, 1fr) auto; } .row-2-even { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+/* Name · email · number of people: one column on phones, three from 700 px. */
+.row-3 { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0 16px; }
+@media (min-width: 700px) { .row-3 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(7.5rem, 0.45fr); } }
 
 .switch-field { display: inline-flex; align-items: center; gap: 10px; align-self: end; margin: 0 0 14px; min-height: 44px; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap; }
 .switch-field input { position: absolute; opacity: 0; width: 1px; height: 1px; min-height: 0; }

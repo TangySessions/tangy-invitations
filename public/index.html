@@ -173,7 +173,7 @@
               <li class="step">
                 <span class="step-num" aria-hidden="true">2</span>
                 <div class="step-body">
-                  <div class="row-2 row-2-even">
+                  <div class="row-3">
                     <label class="field">
                       <span class="label">Recipient name</span>
                       <input id="rcpt-name" type="text" maxlength="100" autocomplete="off" required aria-describedby="rcpt-name-err">
@@ -183,6 +183,11 @@
                       <span class="label">Recipient email</span>
                       <input id="rcpt-email" type="email" maxlength="254" autocomplete="off" required aria-describedby="rcpt-email-err">
                       <span id="rcpt-email-err" class="field-error" hidden></span>
+                    </label>
+                    <label class="field">
+                      <span class="label">Number of people</span>
+                      <input id="rcpt-people" type="number" inputmode="numeric" min="1" max="50" step="1" value="1" required aria-describedby="rcpt-people-err">
+                      <span id="rcpt-people-err" class="field-error" hidden></span>
                     </label>
                   </div>
                 </div>
@@ -226,6 +231,7 @@
             <div><dt>Session</dt><dd><strong id="pv-session"></strong></dd></div>
             <div><dt>From</dt><dd id="pv-from"></dd></div>
             <div><dt>To</dt><dd id="pv-to"></dd></div>
+            <div><dt>People</dt><dd id="pv-people"></dd></div>
             <div><dt>Subject</dt><dd><strong id="pv-subject"></strong></dd></div>
             <div><dt>Source</dt><dd id="pv-source"></dd></div>
           </dl>
@@ -260,9 +266,9 @@
             </label>
           </div>
           <label class="field">
-            <span class="label">CSV content <span class="muted">— first line <code>name,email</code> (either order); quote names that contain commas</span></span>
+            <span class="label">CSV content <span class="muted">— first line <code>name,people,email</code> (in that order; the older <code>name,email</code> also works, with 1 person each); quote names that contain commas</span></span>
             <textarea id="review-csv" class="code" rows="8" spellcheck="false" autocapitalize="off" autocomplete="off"
-              placeholder="name,email&#10;&quot;Doe, Jane&quot;,jane@example.com"></textarea>
+              placeholder="name,people,email&#10;Deepa,3,deepa@example.com&#10;&quot;Doe, Jane&quot;,1,jane@example.com"></textarea>
           </label>
           <p id="review-error" class="alert alert-bad" role="alert" hidden></p>
           <div class="actions">
@@ -286,7 +292,7 @@
               <h3 class="detail-title">Valid recipients</h3>
               <div class="table-wrap">
                 <table class="review-table">
-                  <thead><tr><th scope="col">Row</th><th scope="col">Name</th><th scope="col">Email</th><th scope="col"><span class="visually-hidden">Preview</span></th></tr></thead>
+                  <thead><tr><th scope="col">Row</th><th scope="col">Name</th><th scope="col">People</th><th scope="col">Email</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
                   <tbody id="review-rows"></tbody>
                 </table>
               </div>
@@ -403,6 +409,7 @@
         <dt>Session</dt><dd id="cf-session"></dd>
         <dt>Recipient name</dt><dd id="cf-name"></dd>
         <dt>Recipient email</dt><dd id="cf-email"></dd>
+        <dt>Number of people</dt><dd id="cf-people"></dd>
         <dt>Subject</dt><dd id="cf-subject"></dd>
         <dt>From</dt><dd id="cf-from"></dd>
         <dt>Template</dt><dd id="cf-version"></dd>

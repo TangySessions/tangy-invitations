@@ -794,7 +794,7 @@ test('demo ticket template: one responsive document, supported placeholders only
   assert.ok(!/<style\b|<link\b|<img\b|data:|base64|<script\b/i.test(html), 'inline styles only; no images, embedded data or scripts');
   assert.ok(Buffer.byteLength(html) < 20_000, 'well under Gmail\'s ~102 KB clipping limit');
   const used = [...new Set([...html.matchAll(/\{\{\s*([a-z0-9_]+)\s*\}\}/g)].map((m) => m[1]))].sort();
-  assert.deepEqual(used, ['recipient_email', 'recipient_name']);
+  assert.deepEqual(used, ['number_of_people', 'recipient_email', 'recipient_name']);
   assert.ok(used.every((p) => PLACEHOLDERS.includes(p)));
   for (const c of ['#E8F13A', '#35D5BA', '#4299E8', '#F06AAE']) assert.ok(html.includes(c), `brand colour ${c}`);
   assert.match(html, /border-right:2px dashed #111/, 'ticket stub perforation');
@@ -809,4 +809,24 @@ test('demo ticket template: one responsive document, supported placeholders only
   assert.match(r.text, /Unsubscribe from future invitations: https:\/\/invite\.example\.test\/api\/unsubscribe\/abc$/);
   assert.ok(!/<|&lt;|style=/.test(r.text), 'plain text has no markup');
   assert.ok(r.html.indexOf('Unsubscribe</a>') < r.html.indexOf('</body>'), 'footer inside the body');
+});
+
+test('campaigns refuse lists with people counts above 1 (they cannot store them yet); all-1 lists still work', async () => {
+  const t = await boot();
+  try {
+    const s = await t.login();
+    await saveTemplate(t, s);
+    const csv = 'name,people,email\nDeepa,3,deepa@example.com\nKomal,1,komal@example.com\nRahul,4,rahul@example.com\n';
+    const rv = await review(t, s, csv);
+    assert.deepEqual(rv.recipients.map((x) => x.people), [3, 1, 4]);
+    const r = await t.call('POST', '/api/campaigns', confirmBody(rv, csv), s);
+    assert.deepEqual([r.status, r.data.code, r.data.rows], [422, 'people_not_supported', [2, 4]]);
+    assert.match(r.data.error, /2 recipients have a number of people other than 1 \(first: row 2\)/);
+    assert.deepEqual((await t.call('GET', '/api/campaigns', undefined, s)).data.campaigns, [], 'nothing was created');
+    for (const ok of ['name,people,email\nKomal,1,komal@example.com\n', 'name,email\nKomal,komal@example.com\n']) {
+      const c = await confirmed(t, s, ok);
+      assert.equal(c.total_recipients, 1);
+      await act(t, s, c.id, 'cancel');
+    }
+  } finally { await t.close(); }
 });

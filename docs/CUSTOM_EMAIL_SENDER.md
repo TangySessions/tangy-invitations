@@ -174,7 +174,12 @@ The manual Resend and DNS steps are printed at the end of the report.
 Reviewing never sends, saves, queues or calls Resend.
 
 **Format** (`src/csvImport.js`):
-- The first line is the header, with exactly the columns `name` and `email`, in any case and either order.
+- The first line is the header. Two formats are accepted (any letter case, surrounding spaces ignored):
+  - **`name,people,email`**, in exactly this order. `people` is the number of people on that invitation: a whole number from 1 to 50. Zero, negatives, decimals (`1.5`), signs (`+2`), text and blanks are row errors with a clear message. Sample: `templates/recipients-sample.csv`.
+  - **`name,email`**, the original format, in either order. Every recipient counts as 1 person.
+  - A `people` column in any other position (for example `name,email,people`) is refused with the exact header expected, as are missing or extra columns. Columns are matched by header name, so a People value is never read as an email address.
+- **Use in Send Invitation** (on each reviewed row) copies that row's name, number of people and email into the Send Invitation form, with the same session. Preview it there, then send.
+- **Campaigns can't store people counts yet.** A list in which anyone has more than 1 person is refused at confirmation (`people_not_supported`), never sent as "1". Send those invitations one at a time with Use in Send Invitation. Supporting it in campaigns needs a `people` column on campaign recipients: a schema change (migration 0002 plus SQLite version 5) that needs approval.
 - Fields are separated by commas. Quote a field that contains a comma or a line break, and double any quote inside it: `"Doe, Jane"`, `"Say ""hi"""`.
 - Line endings can be CRLF, LF or CR. A leading UTF-8 byte-order mark (as Excel adds) is ignored.
 
@@ -274,6 +279,9 @@ A compact single-file demo ticket with mock event details is in `templates/tangy
 | --- | --- | --- | --- |
 | `{{recipient_name}}` | The name as entered (trimmed, single spaces) | HTML-escaped | Inserted as text (line breaks removed) |
 | `{{recipient_email}}` | The recipient's address | HTML-escaped | Inserted as text |
+| `{{number_of_people}}` | **Number of people** from Send Invitation step 2 (or the CSV's `people` column): a whole number from 1 to 50. It is **1** when not supplied, including campaign emails. | Digits | Digits |
+
+**Number of people** is checked in the browser and again on the server. It is shown in the preview panel and the send confirmation, and it is part of the signed preview, so a send whose count differs from the preview is refused. It isn't stored in the send log (no schema change). The demo ticket (`templates/tangy-ticket-demo.html`) shows it as **NUMBER OF PEOPLE**. Templates saved earlier show it only if you add `{{number_of_people}}` to them.
 
 **Syntax.** Double braces, with optional spaces inside: `{{ recipient_name }}` works too. Any other `{{…}}` is a save error. Placeholders aren't allowed in CSS, as an attribute name, or at the start of a URL. They are allowed later in a URL, for example `https://tangysessions.com/rsvp?e={{recipient_email}}`.
 

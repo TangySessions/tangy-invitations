@@ -12,7 +12,7 @@
 // validators as single sends (validateRecipient). It is never evaluated,
 // and nothing from it is logged.
 import { createHash } from 'node:crypto';
-import { validateRecipient } from './templatePolicy.js';
+import { validateRecipient, validatePeople, PEOPLE } from './templatePolicy.js';
 
 // Non-blank data rows accepted in one import. Larger lists are refused
 // whole (never truncated). The request body limit (1 MB) also applies.
@@ -94,24 +94,38 @@ const isBlank = (r) => !r.error && r.fields.every((f) => f.trim() === '');
 export const normalizeEmail = (email) => email.trim().toLowerCase();
 
 // Parses and validates an import. Returns
-//   { counts, recipients: [{ row, name, email }], problems: [{ row, kind, message, first_row? }], recipients_hash }
+//   { counts, recipients: [{ row, name, email, people }], problems: [{ row, kind, message, first_row? }], recipients_hash, format }
 // where kind is 'invalid' | 'duplicate' | 'blank'. Throws CsvError for a
 // file that cannot be reviewed at all (bad header, too many rows, unclosed quote).
+// Accepted headers (case-insensitive, surrounding spaces ignored):
+//   name,people,email  — the format with a number of people per invitation;
+//                        exactly this order
+//   name,email          — the original format (either order); people = 1
+// Columns are always mapped by header name, never by position alone.
+export const CSV_HEADER = 'name,people,email';
+const FORMAT_HINT = `Use: ${CSV_HEADER} (or the older name,email)`;
+
 export function reviewCsv(text) {
-  if (typeof text !== 'string' || text.replace(/^\uFEFF/, '').trim() === '') throw new CsvError('The CSV is empty. The first line must be the header: name,email', 'empty');
+  if (typeof text !== 'string' || text.replace(/^\uFEFF/, '').trim() === '') throw new CsvError(`The CSV is empty. The first line must be the header: ${CSV_HEADER}`, 'empty');
   const records = parseCsv(text);
   const [header, ...rows] = records;
   if (header.error) throw new CsvError(`Header (row 1): ${header.error}`, 'bad_header');
   const cols = header.fields.map((f) => f.trim().toLowerCase());
-  if (cols.every((c) => c === '')) throw new CsvError('The first line must be the header: name,email', 'bad_header');
+  if (cols.every((c) => c === '')) throw new CsvError(`The first line must be the header: ${CSV_HEADER}`, 'bad_header');
   const dup = cols.find((c, k) => cols.indexOf(c) !== k);
-  if (dup !== undefined) throw new CsvError(`Header (row 1): the column "${dup.slice(0, 40)}" appears twice. Use exactly: name,email`, 'bad_header');
-  const unknown = cols.filter((c) => c !== 'name' && c !== 'email');
-  if (unknown.length) throw new CsvError(`Header (row 1): unexpected column${unknown.length > 1 ? 's' : ''} ${unknown.map((c) => `"${c.slice(0, 40)}"`).join(', ')}. Use exactly: name,email`, 'bad_header');
+  if (dup !== undefined) throw new CsvError(`Header (row 1): the column "${dup.slice(0, 40)}" appears twice. ${FORMAT_HINT}`, 'bad_header');
+  const unknown = cols.filter((c) => c !== 'name' && c !== 'email' && c !== 'people');
+  if (unknown.length) throw new CsvError(`Header (row 1): unexpected column${unknown.length > 1 ? 's' : ''} ${unknown.map((c) => `"${c.slice(0, 40)}"`).join(', ')}. ${FORMAT_HINT}`, 'bad_header');
   const missing = ['name', 'email'].filter((c) => !cols.includes(c));
-  if (missing.length) throw new CsvError(`Header (row 1): missing the ${missing.join(' and ')} column. Use exactly: name,email`, 'bad_header');
+  if (missing.length) throw new CsvError(`Header (row 1): missing the ${missing.join(' and ')} column. ${FORMAT_HINT}`, 'bad_header');
+  const withPeople = cols.includes('people');
+  if (withPeople && cols.join(',') !== CSV_HEADER) {
+    throw new CsvError(`Header (row 1): with a people column the header must be exactly ${CSV_HEADER} (in that order); found ${cols.join(',')}.`, 'bad_header');
+  }
   const nameAt = cols.indexOf('name');
   const emailAt = cols.indexOf('email');
+  const peopleAt = cols.indexOf('people');
+  const columnList = withPeople ? 'name, people, email' : 'name, email';
 
   // (A final line break ends the last record; it never adds a blank row.)
   const dataRows = rows.filter((r) => !isBlank(r)).length;
@@ -134,15 +148,23 @@ export function reviewCsv(text) {
       problems.push({ row: r.line, kind: 'invalid', message: r.error });
       continue;
     }
-    if (r.fields.length !== 2) {
+    if (r.fields.length !== cols.length) {
       counts.invalid++;
-      problems.push({ row: r.line, kind: 'invalid', message: `Expected 2 columns (name, email); found ${r.fields.length}. Quote any name that contains a comma.` });
+      problems.push({ row: r.line, kind: 'invalid', message: `Expected ${cols.length} columns (${columnList}); found ${r.fields.length}. Quote any name that contains a comma.` });
       continue;
     }
     const v = validateRecipient({ name: r.fields[nameAt], email: r.fields[emailAt] });
-    if (v.errors) {
+    // People: digits only (no sign, decimals or text), 1–PEOPLE.max.
+    const rawPeople = withPeople ? r.fields[peopleAt].trim() : String(PEOPLE.def);
+    const people = /^\d{1,6}$/.test(rawPeople) ? validatePeople(Number(rawPeople)) : { error: 'invalid' };
+    if (v.errors || people.error) {
       counts.invalid++;
-      problems.push({ row: r.line, kind: 'invalid', message: [v.errors.name && `Name: ${v.errors.name}`, v.errors.email && `Email: ${v.errors.email}`].filter(Boolean).join(' ') });
+      problems.push({
+        row: r.line, kind: 'invalid',
+        message: [v.errors?.name && `Name: ${v.errors.name}`,
+          people.error && `People: ${rawPeople ? `"${rawPeople.slice(0, 20)}" is not` : 'missing —'} a whole number from ${PEOPLE.min} to ${PEOPLE.max}.`,
+          v.errors?.email && `Email: ${v.errors.email}`].filter(Boolean).join(' '),
+      });
       continue;
     }
     const email = normalizeEmail(v.recipient.email);
@@ -152,15 +174,15 @@ export function reviewCsv(text) {
       continue;
     }
     firstRowOf.set(email, r.line);
-    recipients.push({ row: r.line, name: v.recipient.name, email });
+    recipients.push({ row: r.line, name: v.recipient.name, email, people: people.people });
   }
   counts.valid = recipients.length;
   counts.skipped = counts.invalid + counts.duplicate + counts.blank;
   problems.sort((a, b) => a.row - b.row);
   // Identifies exactly this recipient list (order included), so a later
   // confirmation step can check that it is what was reviewed.
-  const recipients_hash = createHash('sha256').update(JSON.stringify(recipients.map((x) => [x.name, x.email]))).digest('hex');
-  return { counts, recipients, problems, recipients_hash };
+  const recipients_hash = createHash('sha256').update(JSON.stringify(recipients.map((x) => [x.name, x.email, x.people]))).digest('hex');
+  return { counts, recipients, problems, recipients_hash, format: withPeople ? CSV_HEADER : 'name,email' };
 }
 
 // Identifies the exact saved template content that was reviewed.
