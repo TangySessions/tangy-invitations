@@ -179,7 +179,7 @@ Reviewing never sends, saves, queues or calls Resend.
   - **`name,email`**, the original format, in either order. Every recipient counts as 1 person.
   - A `people` column in any other position (for example `name,email,people`) is refused with the exact header expected, as are missing or extra columns. Columns are matched by header name, so a People value is never read as an email address.
 - **Use in Send Invitation** (on each reviewed row) copies that row's name, number of people and email into the Send Invitation form, with the same session. Preview it there, then send.
-- **Campaigns can't store people counts yet.** A list in which anyone has more than 1 person is refused at confirmation (`people_not_supported`), never sent as "1". Send those invitations one at a time with Use in Send Invitation. Supporting it in campaigns needs a `people` column on campaign recipients: a schema change (migration 0002 plus SQLite version 5) that needs approval.
+- **Campaigns keep each recipient's people count.** It is stored with the recipient at confirmation (`campaign_recipients.people`, 1–50, fixed after confirmation), shown in the campaign's recipient list, and rendered as `{{number_of_people}}` in that recipient's email. This needs PostgreSQL migration 0002 or SQLite schema version 5.
 - Fields are separated by commas. Quote a field that contains a comma or a line break, and double any quote inside it: `"Doe, Jane"`, `"Say ""hi"""`.
 - Line endings can be CRLF, LF or CR. A leading UTF-8 byte-order mark (as Excel adds) is ignored.
 
@@ -279,7 +279,7 @@ A compact single-file demo ticket with mock event details is in `templates/tangy
 | --- | --- | --- | --- |
 | `{{recipient_name}}` | The name as entered (trimmed, single spaces) | HTML-escaped | Inserted as text (line breaks removed) |
 | `{{recipient_email}}` | The recipient's address | HTML-escaped | Inserted as text |
-| `{{number_of_people}}` | **Number of people** from Send Invitation step 2 (or the CSV's `people` column): a whole number from 1 to 50. It is **1** when not supplied, including campaign emails. | Digits | Digits |
+| `{{number_of_people}}` | **Number of people**: from Send Invitation step 2, or each campaign recipient's CSV `people` value. A whole number from 1 to 50; **1** when not supplied (for example `name,email` lists). | Digits | Digits |
 
 **Number of people** is checked in the browser and again on the server. It is shown in the preview panel and the send confirmation, and it is part of the signed preview, so a send whose count differs from the preview is refused. It isn't stored in the send log (no schema change). The demo ticket (`templates/tangy-ticket-demo.html`) shows it as **NUMBER OF PEOPLE**. Templates saved earlier show it only if you add `{{number_of_people}}` to them.
 
@@ -734,9 +734,10 @@ Resend is a stubbed `fetch` in every test. **No request leaves the machine and n
 | `test/app.test.js` | 33 | Authentication on every route; login failures, lock-out and disabled accounts; no sign-up route; CSRF; four slots; invalid session ids; independent configuration and edits; no content copying; persistence of all four across a restart; unsafe templates rejected server-side; stale-save conflict; size limit; unconfigured and inactive sessions blocked (including a forged session id); preview shows only the selected session and never writes; stale previews (template edit, other session, other recipient, forged version, expiry); exact no-template message; sends use the saved template with one recipient and no cc/bcc; each session sends its own content with no leakage; browser can't supply HTML, subject, to/cc/bcc or lists; missing config; unverified domain; provider rejection; timeout ambiguous with no automatic retry and identical key and body on manual retry; duplicate handling; connection refused and 5xx; test sends (selected session, test address only, tokens not interchangeable); send history with session name at send time; rate limit across sessions; dry run with and without a key never calls Resend; key absent from `public/`, responses and logs; logs free of recipients, bodies and tokens; CSP and fully sandboxed iframe; no path traversal |
 | `test/db.test.js` | 6 | New database = four unconfigured slots at v2; v1 → v2 migration (backup, legacy template to Session 1 only, history, accounts and login sessions preserved, old table kept, re-open is a no-op); v1 without a template; failed migration rolls back completely; database constraints reject invalid or duplicate slots; a save changes exactly one row |
 
-**Results on 2026-10-09 (Node 24.12.0):**
-- `npm test`: **76 tests, 76 passed, 0 failed.**
-- `npm run check`: syntax checks pass. **`check:secrets` fails**, because `.env.example` line 22 contains a Resend-key-shaped value (see §13).
+**Latest verification (2026-10-11):**
+- `npm test`: **233 tests passed, 0 failed.**
+- `npm run test:pg`: **181 tests passed, 0 failed.**
+- `npm run check`: syntax checks passed; `check:secrets` scanned 75 files and found no secrets.
 - Mutation checks: skipping the preview-token check made 3 tests fail, and forcing every send to Session 1 made 4 fail. Both changes were reverted.
 - Manual dry-run smoke test against a migrated copy of the local database: sign in, four slots, unconfigured preview blocked, two sessions saved, each sent with its own subject, unconfigured send blocked, test send, history with session ids, template unchanged. Passed.
 - **Not exercised:** the in-browser UI. The Chrome extension wasn't connected earlier. Load the page once before relying on it.

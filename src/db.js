@@ -17,13 +17,16 @@
 //   0 → 1-template schema (table `template`), or a brand-new file
 //   2 → four session templates
 //   3 → + campaigns and campaign_recipients
-//   4 → + suppressions and per-recipient unsubscribe hashes (this version)
+//   4 → + suppressions and per-recipient unsubscribe hashes
+//   5 → + campaign_recipients.people (number of people per invitation; this version)
 // Any upgrade backs the file up first (DATA_DIR/backups/, VACUUM INTO), then
 // runs in one transaction. 0→2: the legacy single template — if any — moves
 // into s1 only; s2–s4 start unconfigured; send_log gains session columns
 // (old rows keep NULL = "before sessions"); the old table is renamed, not
 // dropped. 2→3 only adds the two campaign tables; 3→4 only adds the
-// suppression table, one column and updated triggers (nothing existing changes).
+// suppression table, one column and updated triggers; 4→5 only adds the
+// people column (existing recipients get 1) and its trigger. Nothing existing
+// is rewritten.
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, chmodSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -31,7 +34,7 @@ import { existingDecision, RATE_WINDOW_MS } from './store/sendClaim.js';
 import { CAMPAIGN_ACTIONS, MAX_ATTEMPTS, countsFrom } from './store/campaignRules.js';
 
 export const SESSION_IDS = Object.freeze(['s1', 's2', 's3', 's4']);
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 export const defaultLabel = (id) => `Session ${SESSION_IDS.indexOf(id) + 1}`;
 
 const BASE_SCHEMA = `
@@ -253,6 +256,16 @@ create trigger campaign_recipients_unsubscribe_fixed before update of unsubscrib
 begin select raise(abort, 'recipient details are fixed and counters only increase'); end;
 `;
 
+// v5: number of people per campaign recipient (mirrors 0002's
+// campaign_recipients.people). Existing rows get 1 — correct, because lists
+// with other counts could not be confirmed before this version.
+const PEOPLE = `
+alter table campaign_recipients add column people integer not null default 1 check (people between 1 and 50);
+create trigger campaign_recipients_people_fixed before update of people on campaign_recipients
+  when new.people is not old.people
+begin select raise(abort, 'recipient details are fixed and counters only increase'); end;
+`;
+
 const iso = (ms) => new Date(ms).toISOString();
 const isoOrNull = (ms) => (ms == null ? null : iso(ms));
 const tableExists = (db, name) => !!db.prepare("select 1 from sqlite_master where type = 'table' and name = ?").get(name);
@@ -278,6 +291,7 @@ function migrate(db, file, { now = Date.now } = {}) {
     if (version < 2) migrateToV2(db, legacy, now);
     if (version < 3) db.exec(CAMPAIGNS);
     if (version < 4) db.exec(SUPPRESSION);
+    if (version < 5) db.exec(PEOPLE);
     db.exec(`pragma user_version = ${SCHEMA_VERSION}`);
     db.exec('commit');
   } catch (err) {
@@ -501,9 +515,9 @@ function wrap(db, migration) {
          values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(c.id, c.creationKey, c.adminId, c.sessionId, c.sessionName, c.name, c.templateVersion, c.templateHash, c.recipientsHash,
           c.recipients.length, c.counts.total, c.counts.invalid, c.counts.duplicate, c.counts.blank, c.now, c.now);
-      const ins = q(`insert into campaign_recipients (campaign_id, row_number, name, email, send_id, unsubscribe_hash, created_at, updated_at)
-                     values (?, ?, ?, ?, ?, ?, ?, ?)`);
-      for (const r of c.recipients) ins.run(c.id, r.row, r.name, r.email, r.sendId, r.unsubscribeHash, c.now, c.now);
+      const ins = q(`insert into campaign_recipients (campaign_id, row_number, name, email, people, send_id, unsubscribe_hash, created_at, updated_at)
+                     values (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      for (const r of c.recipients) ins.run(c.id, r.row, r.name, r.email, r.people ?? 1, r.sendId, r.unsubscribeHash, c.now, c.now);
       // Already opted out: kept in the campaign (for the record), never sent.
       const skip = q(`update campaign_recipients set status = 'skipped', reason = 'suppressed', completed_at = ?, updated_at = ?
                        where campaign_id = ? and email = ? and status = 'pending'`);
@@ -527,7 +541,7 @@ function wrap(db, migration) {
       const where = `campaign_id = ?${status ? ' and status = ?' : ''}`;
       const args = status ? [id, status] : [id];
       const total = q(`select count(*) as n from campaign_recipients where ${where}`).get(...args).n;
-      const rows = q(`select row_number, name, email, status, attempts, reason, provider_message_id, next_attempt_at, updated_at, completed_at
+      const rows = q(`select row_number, name, email, people, status, attempts, reason, provider_message_id, next_attempt_at, updated_at, completed_at
                         from campaign_recipients where ${where} order by row_number limit ? offset ?`).all(...args, limit, offset)
         .map((r) => ({ ...r, next_attempt_at: isoOrNull(r.next_attempt_at), updated_at: iso(r.updated_at), completed_at: isoOrNull(r.completed_at) }));
       return { total, rows };
@@ -587,7 +601,7 @@ function wrap(db, migration) {
       return {
         outcome: 'claimed',
         recipient: {
-          id: r.id, row_number: r.row_number, name: r.name, email: r.email, send_id: r.send_id, unsubscribe_hash: r.unsubscribe_hash, reason: r.reason,
+          id: r.id, row_number: r.row_number, name: r.name, email: r.email, people: r.people, send_id: r.send_id, unsubscribe_hash: r.unsubscribe_hash, reason: r.reason,
           claim_count: r.claim_count + 1, attempts: r.attempts + 1, first_attempt_at: r.first_attempt_at ?? now, taken_over: r.status === 'claimed',
         },
       };

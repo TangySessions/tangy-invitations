@@ -17,7 +17,7 @@ import { join, dirname } from 'node:path';
 
 export const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'migrations', 'postgres');
 const LOCK_KEY = 7_302_154_011; // arbitrary constant for pg_advisory_lock
-export const APPROVED_MIGRATION_VERSION = 1; // 0002_campaigns is proposed, not approved
+export const APPROVED_MIGRATION_VERSION = 2; // 0002_campaigns approved (campaigns, unsubscribe, people); apply it manually
 
 export function listMigrations(dir = MIGRATIONS_DIR) {
   return readdirSync(dir)

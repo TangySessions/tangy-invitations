@@ -12,6 +12,10 @@ select tablename, policyname, roles from pg_policies where schemaname = 'mailer'
 select event_object_table as table_name, trigger_name from information_schema.triggers
  where trigger_schema = 'mailer' group by 1, 2 order by 1, 2;
 --   campaign_recipients: campaign_recipients_guard, campaign_recipients_insert_guard | campaigns: campaigns_complete_list, campaigns_guard
+select column_name, data_type, column_default, is_nullable from information_schema.columns
+ where table_schema = 'mailer' and table_name = 'campaign_recipients' and column_name = 'people';   -- people | smallint | 1 | NO
+select pg_get_constraintdef(c.oid) as people_check from pg_constraint c
+ where c.conrelid = 'mailer.campaign_recipients'::regclass and c.contype = 'c' and pg_get_constraintdef(c.oid) like '%people%';   -- CHECK (((people >= 1) AND (people <= 50)))
 select indexname from pg_indexes where schemaname = 'mailer' and indexname in ('campaigns_one_open_per_session', 'campaign_recipients_due_idx', 'campaign_recipients_pending_email_idx') order by 1;   -- 3 rows
 select r as role, has_table_privilege(r, 'mailer.suppressions', 'select') as can_read_suppressions
   from unnest(array['anon', 'authenticated']) as r where exists (select 1 from pg_roles where rolname = r);   -- all false

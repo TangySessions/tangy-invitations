@@ -144,7 +144,7 @@ export async function openPgStore(dbConfig, { url = dbConfig.url, log = console,
         ? { available: true }
         : {
           available: false, schema_version: v, required_version: CAMPAIGNS_SCHEMA_VERSION,
-          reason: `Campaigns need database schema version ${CAMPAIGNS_SCHEMA_VERSION} (migration 0002_campaigns). This database is at version ${v}: the migration has not been approved and applied yet. Reviewing a list still works; confirming and sending campaigns is unavailable.`,
+          reason: `Campaigns need database schema version ${CAMPAIGNS_SCHEMA_VERSION} (migration 0002_campaigns). This database is at version ${v}: the migration has not been applied to this database yet. Reviewing a list still works; confirming and sending campaigns is unavailable.`,
         };
     },
 
@@ -170,11 +170,11 @@ export async function openPgStore(dbConfig, { url = dbConfig.url, log = console,
         [c.id, c.creationKey, c.adminId, c.sessionId, c.sessionName, c.name, c.templateVersion, c.templateHash, c.recipientsHash,
           c.recipients.length, c.counts.total, c.counts.invalid, c.counts.duplicate, c.counts.blank, c.now]);
       await cl.query(
-        `insert into mailer.campaign_recipients (campaign_id, row_number, name, email, send_id, unsubscribe_hash, created_at, updated_at)
-         select $1::uuid, r.row_number, r.name, r.email, r.send_id, r.unsubscribe_hash, ${ts(5)}, ${ts(5)}
-           from unnest($2::int[], $3::text[], $4::text[], $6::uuid[], $7::text[]) as r(row_number, name, email, send_id, unsubscribe_hash)`,
+        `insert into mailer.campaign_recipients (campaign_id, row_number, name, email, people, send_id, unsubscribe_hash, created_at, updated_at)
+         select $1::uuid, r.row_number, r.name, r.email, r.people, r.send_id, r.unsubscribe_hash, ${ts(5)}, ${ts(5)}
+           from unnest($2::int[], $3::text[], $4::text[], $6::uuid[], $7::text[], $8::smallint[]) as r(row_number, name, email, send_id, unsubscribe_hash, people)`,
         [c.id, c.recipients.map((r) => r.row), c.recipients.map((r) => r.name), c.recipients.map((r) => r.email), c.now,
-          c.recipients.map((r) => r.sendId), c.recipients.map((r) => r.unsubscribeHash)]);
+          c.recipients.map((r) => r.sendId), c.recipients.map((r) => r.unsubscribeHash), c.recipients.map((r) => r.people ?? 1)]);
       // Already opted out: kept in the campaign (for the record), never sent.
       if (c.suppressedEmails?.length) {
         await cl.query(`update mailer.campaign_recipients set status = 'skipped', reason = 'suppressed', completed_at = ${ts(2)}, updated_at = ${ts(2)}
@@ -203,7 +203,7 @@ export async function openPgStore(dbConfig, { url = dbConfig.url, log = console,
       const where = `campaign_id = $1${status ? ' and status = $2' : ''}`;
       const { n: total } = await one(`select count(*)::int as n from mailer.campaign_recipients where ${where}`, args);
       const rows = (await all(
-        `select row_number, name, email, status, attempts, reason, provider_message_id, next_attempt_at, updated_at, completed_at
+        `select row_number, name, email, people, status, attempts, reason, provider_message_id, next_attempt_at, updated_at, completed_at
            from mailer.campaign_recipients where ${where} order by row_number limit $${args.length + 1} offset $${args.length + 2}`, [...args, limit, offset]))
         .map((r) => ({ ...r, next_attempt_at: iso(r.next_attempt_at), updated_at: iso(r.updated_at), completed_at: iso(r.completed_at) }));
       return { total, rows };
@@ -249,7 +249,7 @@ export async function openPgStore(dbConfig, { url = dbConfig.url, log = console,
       const busy = await cl.query(`select 1 from mailer.campaign_recipients where campaign_id = $1 and status = 'claimed' and claimed_at > ${ts(2)} limit 1`, [id, now - staleMs]);
       if (busy.rowCount) return { outcome: 'busy' };
       const { rows: [r] } = await cl.query(
-        `select id, row_number, name, email, send_id, unsubscribe_hash, status, reason, claim_count, attempts, ${ms('first_attempt_at')} as first_ms
+        `select id, row_number, name, email, people, send_id, unsubscribe_hash, status, reason, claim_count, attempts, ${ms('first_attempt_at')} as first_ms
            from mailer.campaign_recipients
           where campaign_id = $1 and attempts < $2
             and ((status = 'claimed' and claimed_at <= ${ts(3)}) or (status = 'pending' and (next_attempt_at is null or next_attempt_at <= ${ts(4)})))
@@ -266,7 +266,7 @@ export async function openPgStore(dbConfig, { url = dbConfig.url, log = console,
       return {
         outcome: 'claimed',
         recipient: {
-          id: Number(r.id), row_number: r.row_number, name: r.name, email: r.email, send_id: r.send_id, unsubscribe_hash: r.unsubscribe_hash, reason: r.reason,
+          id: Number(r.id), row_number: r.row_number, name: r.name, email: r.email, people: r.people, send_id: r.send_id, unsubscribe_hash: r.unsubscribe_hash, reason: r.reason,
           claim_count: r.claim_count + 1, attempts: r.attempts + 1, first_attempt_at: r.first_ms == null ? now : Math.round(r.first_ms), taken_over: r.status === 'claimed',
         },
       };

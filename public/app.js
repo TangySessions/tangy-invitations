@@ -825,15 +825,12 @@ function renderReview() {
     '. Confirming would email them again — remove them from the CSV if that is not intended.',
   ] : []));
   const available = r.campaigns?.available !== false;
-  // Campaigns cannot store people counts yet (the server refuses too).
-  const multi = r.recipients.filter((x) => x.people !== 1).length;
-  const canConfirm = available && r.counts.valid > 0 && r.session_active && !multi;
+  const canConfirm = available && r.counts.valid > 0 && r.session_active;
   $('review-confirm').disabled = !canConfirm;
   $('review-unavailable').hidden = canConfirm;
   $('review-unavailable').textContent = !available ? r.campaigns.reason
     : !r.session_active ? 'Turn this session on for sending before confirming a campaign.'
-      : r.counts.valid === 0 ? 'No valid recipients to confirm.'
-        : multi ? `${multi} recipient${multi === 1 ? ' has' : 's have'} more than 1 person. Campaigns cannot store people counts yet — send these one at a time with “Use in Send Invitation”.` : '';
+      : r.counts.valid === 0 ? 'No valid recipients to confirm.' : '';
   $('review-out').hidden = false;
 }
 
@@ -843,11 +840,12 @@ function openConfirm() {
   if (!r) return;
   $('cc-session').textContent = `${r.session_label} (${r.session_id})`;
   $('cc-template').textContent = `version ${r.template_version} · content ${r.template_hash.slice(0, 12)}`;
-  $('cc-count').textContent = `${r.counts.valid} recipient${r.counts.valid === 1 ? '' : 's'} · list fingerprint ${r.recipients_hash.slice(0, 12)}`;
+  const people = r.recipients.reduce((n, x) => n + (x.people ?? 1), 0);
+  $('cc-count').textContent = `${r.counts.valid} recipient${r.counts.valid === 1 ? '' : 's'} (${people} ${people === 1 ? 'person' : 'people'} in total) · list fingerprint ${r.recipients_hash.slice(0, 12)}`;
   const sup = (r.suppressed_rows || []).length;
   $('cc-skipped').textContent = [r.counts.skipped ? `${r.counts.invalid} invalid, ${r.counts.duplicate} duplicate, ${r.counts.blank} blank — not included` : '',
     sup ? `${sup} unsubscribed — kept but never sent` : ''].filter(Boolean).join('; ') || 'none';
-  const sample = r.recipients.slice(0, 3).map((x) => `${x.name} <${x.email}>`).join(' · ');
+  const sample = r.recipients.slice(0, 3).map((x) => `${x.name} (${x.people ?? 1}) <${x.email}>`).join(' · ');
   $('cc-sample').textContent = `${sample}${r.recipients.length > 3 ? ' · …' : ''}${r.preview?.subject ? ` — e.g. subject “${r.preview.subject}”` : ''}`;
   $('cc-from').textContent = r.from || '(EMAIL_FROM not set)';
   $('cc-mode').textContent = r.dry_run ? 'Dry run — sending will be simulated; no email is sent.' : 'Real sending is configured — emails will go out when you press Start.';
@@ -1016,12 +1014,12 @@ function renderCampaign() {
   const rows = cur.rows;
   const pages = Math.max(1, Math.ceil(rows.total / rows.page_size));
   $('cd-rows').replaceChildren(...(rows.recipients.length ? rows.recipients.map((x) => el('tr', {},
-    el('td', {}, String(x.row_number)), el('td', {}, x.name), el('td', {}, x.email),
+    el('td', {}, String(x.row_number)), el('td', {}, x.name), el('td', {}, String(x.people ?? 1)), el('td', {}, x.email),
     el('td', {}, el('span', { class: `pill plain ${R_STATUS[x.status][0]}` }, R_STATUS[x.status][1])),
     el('td', {}, String(x.attempts)),
     el('td', { class: 'small' }, [x.reason ? REASONS[x.reason] || x.reason : '', x.provider_message_id ? `id ${x.provider_message_id}` : '',
       x.status === 'pending' && x.next_attempt_at ? `next try ${fmtTime(x.next_attempt_at)}` : ''].filter(Boolean).join(' · '))))
-    : [el('tr', {}, el('td', { colspan: '6', class: 'muted' }, 'No recipients match.'))]));
+    : [el('tr', {}, el('td', { colspan: '7', class: 'muted' }, 'No recipients match.'))]));
   $('cd-page').textContent = `Page ${cur.page} of ${pages} · ${rows.total} recipient${rows.total === 1 ? '' : 's'}`;
   $('cd-prev').disabled = cur.page <= 1;
   $('cd-next').disabled = cur.page >= pages;

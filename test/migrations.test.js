@@ -3,9 +3,11 @@
 // itself is executed against PostgreSQL in test/pg/campaigns.test.js.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, copyFileSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { listMigrations, migrate, planMigrations, APPROVED_MIGRATION_VERSION } from '../src/store/pgMigrate.js';
+import { listMigrations, migrate, planMigrations, APPROVED_MIGRATION_VERSION, MIGRATIONS_DIR } from '../src/store/pgMigrate.js';
 
 const files = listMigrations();
 const byName = Object.fromEntries(files.map((m) => [m.name, m]));
@@ -39,20 +41,37 @@ test('migration files: numbered 0001, 0002, … with no gaps; 0001 is unchanged 
   assert.equal(createHash('sha256').update(readFileSync(new URL('../migrations/postgres/0001_init.sql', import.meta.url))).digest('hex'), APPLIED_0001_SHA256);
 });
 
-test('approval gate: by default only approved migrations are applied; 0002 is held', async () => {
-  assert.equal(APPROVED_MIGRATION_VERSION, 1, '0002 is a proposal until explicitly approved');
-  // A database at version 1 (like the Supabase project today).
+test('approval gate: 0002 is approved — by default a version-1 database is migrated to 2', async () => {
+  assert.equal(APPROVED_MIGRATION_VERSION, 2, '0002_campaigns (campaigns, unsubscribe, people) is approved');
+  // A database at version 1 (like the Supabase project before applying 0002).
   const db = fakeClient([files[0]]);
   const r = await migrate(db);
-  assert.deepEqual([r.applied, r.held, r.current], [[], ['0002_campaigns'], 1]);
-  assert.ok(!db.queries.some((q) => q.includes('mailer.campaigns')), '0002 SQL never sent');
-  // An empty database: 0001 only.
-  const empty = fakeClient([]);
-  const e = await migrate(empty);
-  assert.deepEqual([e.applied, e.held, e.current], [['0001_init'], ['0002_campaigns'], 1]);
+  assert.deepEqual([r.applied, r.held, r.current], [['0002_campaigns'], [], 2]);
+  // An empty database: both.
+  const e = await migrate(fakeClient([]));
+  assert.deepEqual([e.applied, e.held, e.current], [['0001_init', '0002_campaigns'], [], 2]);
+  // A lower explicit target still holds 0002 back (nothing of it is sent).
+  const v1 = fakeClient([files[0]]);
+  const held = await migrate(v1, { target: 1 });
+  assert.deepEqual([held.applied, held.held, held.current], [[], ['0002_campaigns'], 1]);
+  assert.ok(!v1.queries.some((q) => q.includes('mailer.campaigns')), '0002 SQL never sent');
 });
 
-test('approval gate: an explicit target applies 0002 in its own transaction and records its checksum', async () => {
+test('approval gate still holds back any FUTURE migration above the approved version', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tangy-migrations-'));
+  try {
+    for (const f of ['0001_init.sql', '0002_campaigns.sql']) copyFileSync(join(MIGRATIONS_DIR, f), join(dir, f));
+    writeFileSync(join(dir, '0003_future.sql'), 'select 1;');
+    const db = fakeClient([files[0], files[1]]);
+    const r = await migrate(db, { dir });
+    assert.deepEqual([r.applied, r.held, r.current], [[], ['0003_future'], 2]);
+    assert.ok(!db.queries.includes('select 1;'), 'the unapproved file is never sent');
+    const p = await planMigrations(fakeClient([files[0]]), { dir });
+    assert.deepEqual([p.pending, p.held], [['0002_campaigns'], ['0003_future']]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('0002 is applied in its own transaction and records its checksum', async () => {
   const applied = [files[0]];
   const db = fakeClient(applied);
   const r = await migrate(db, { target: 2 });
@@ -113,12 +132,14 @@ test('the PostgreSQL test harness refuses any non-local PG_TEST_URL before conne
 test('plan (db-migrate.js --plan) only reads, and reports applied / approved-pending / held / problems', async () => {
   const db = fakeClient([files[0]]);
   const p = await planMigrations(db);
-  assert.deepEqual(p, { current: 1, applied: ['0001_init'], pending: [], held: ['0002_campaigns'], problems: [] });
+  assert.deepEqual(p, { current: 1, applied: ['0001_init'], pending: ['0002_campaigns'], held: [], problems: [] });
   assert.ok(db.queries.every((q) => /^select /i.test(q.trim())), 'select statements only — no lock, no create, no insert');
   const empty = await planMigrations(fakeClient([]));
-  assert.deepEqual([empty.current, empty.pending, empty.held], [0, ['0001_init'], ['0002_campaigns']]);
+  assert.deepEqual([empty.current, empty.pending, empty.held], [0, ['0001_init', '0002_campaigns'], []]);
   const bad = await planMigrations(fakeClient([{ ...files[0], checksum: '0'.repeat(64) }]));
   assert.match(bad.problems[0], /0001_init was changed after it was applied/);
-  const approved = await planMigrations(fakeClient([files[0]]), { target: 2 });
-  assert.deepEqual([approved.pending, approved.held], [['0002_campaigns'], []]);
+  const lower = await planMigrations(fakeClient([files[0]]), { target: 1 });
+  assert.deepEqual([lower.pending, lower.held], [[], ['0002_campaigns']]);
+  const done = await planMigrations(fakeClient([files[0], files[1]]));
+  assert.deepEqual([done.current, done.pending, done.held], [2, [], []]);
 });

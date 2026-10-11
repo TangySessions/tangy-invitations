@@ -152,9 +152,9 @@ test('safeDbError never returns connection strings or passwords', () => {
 test('migration files are versioned; the code runs on every version from the approved one to the latest file', () => {
   const m = listMigrations();
   assert.deepEqual(m.map((x) => x.version), m.map((_, i) => i + 1), 'contiguous 0001, 0002, …');
-  // db:migrate applies files up to APPROVED_MIGRATION_VERSION (still 1), so a
-  // real database is at that version; the code must run there (campaigns
-  // reported unavailable) and on the latest file once it is approved.
+  // db:migrate applies files up to APPROVED_MIGRATION_VERSION (2: 0002 is
+  // approved); the code also runs on version 1 (campaigns reported
+  // unavailable) until 0002 has been applied to a database.
   assert.equal(MAX_SCHEMA_VERSION, m.at(-1).version);
   assert.ok(MIN_SCHEMA_VERSION <= APPROVED_MIGRATION_VERSION && APPROVED_MIGRATION_VERSION <= MAX_SCHEMA_VERSION);
   assert.equal(CAMPAIGNS_SCHEMA_VERSION, 2);

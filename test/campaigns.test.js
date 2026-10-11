@@ -811,8 +811,8 @@ test('demo ticket template: one responsive document, supported placeholders only
   assert.ok(r.html.indexOf('Unsubscribe</a>') < r.html.indexOf('</body>'), 'footer inside the body');
 });
 
-test('campaigns refuse lists with people counts above 1 (they cannot store them yet); all-1 lists still work', async () => {
-  const t = await boot();
+test('campaigns keep each recipient\'s people count: confirmed, stored, listed, claimed and rendered into that recipient\'s email', async () => {
+  const t = await boot({ dryRun: false });
   try {
     const s = await t.login();
     await saveTemplate(t, s);
@@ -820,13 +820,23 @@ test('campaigns refuse lists with people counts above 1 (they cannot store them 
     const rv = await review(t, s, csv);
     assert.deepEqual(rv.recipients.map((x) => x.people), [3, 1, 4]);
     const r = await t.call('POST', '/api/campaigns', confirmBody(rv, csv), s);
-    assert.deepEqual([r.status, r.data.code, r.data.rows], [422, 'people_not_supported', [2, 4]]);
-    assert.match(r.data.error, /2 recipients have a number of people other than 1 \(first: row 2\)/);
-    assert.deepEqual((await t.call('GET', '/api/campaigns', undefined, s)).data.campaigns, [], 'nothing was created');
-    for (const ok of ['name,people,email\nKomal,1,komal@example.com\n', 'name,email\nKomal,komal@example.com\n']) {
-      const c = await confirmed(t, s, ok);
-      assert.equal(c.total_recipients, 1);
-      await act(t, s, c.id, 'cancel');
+    assert.equal(r.status, 201, JSON.stringify(r.data));
+    const c = r.data.campaign;
+    const listed = (await recipients(t, s, c.id)).recipients;
+    assert.deepEqual(listed.map((x) => [x.name, x.people, x.email]), [['Deepa', 3, 'deepa@example.com'], ['Komal', 1, 'komal@example.com'], ['Rahul', 4, 'rahul@example.com']]);
+    await act(t, s, c.id, 'start');
+    const out = await drain(t, s, c.id);
+    assert.deepEqual([out.campaign.status, out.campaign.counts.accepted], ['completed', 3]);
+    const byTo = Object.fromEntries(t.resend.sends().map((x) => [x.body.to[0], x.body]));
+    for (const [name, people, email] of [['Deepa', 3, 'deepa@example.com'], ['Komal', 1, 'komal@example.com'], ['Rahul', 4, 'rahul@example.com']]) {
+      const sent = byTo[email];
+      assert.ok(sent, email);
+      assert.ok(sent.html.includes(`HEY ${name},`), `${email}: name`);
+      assert.ok(sent.html.includes(`<b>NUMBER OF PEOPLE</b></td><td align="right"><b>${people}</b>`), `${email}: people ${people}`);
+      assert.match(sent.text, new RegExp(`NUMBER OF PEOPLE ${people}\\b`), `${email}: plain text`);
     }
+    // An older name,email list still means 1 person each (s1 is free again: the campaign completed).
+    const legacy = await confirmed(t, s, 'name,email\nAsha,asha@example.com\n', 's1');
+    assert.deepEqual((await recipients(t, s, legacy.id)).recipients.map((x) => x.people), [1]);
   } finally { await t.close(); }
 });

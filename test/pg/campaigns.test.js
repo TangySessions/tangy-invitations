@@ -1,7 +1,8 @@
 // Migration 0002 (campaigns) against the disposable local PostgreSQL
-// (npm run pg:test:up, then npm run test:pg). 0002 is not approved for real
-// databases, so every database here is migrated to it EXPLICITLY
-// (migrate(..., { target: 2 })). Nothing here can reach a remote database.
+// (npm run pg:test:up, then npm run test:pg). 0002 is approved
+// (APPROVED_MIGRATION_VERSION = 2), so the shared test template is at
+// version 2; tests that need a version-1 database build one explicitly
+// (v1Db). Nothing here can reach a remote database.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
@@ -42,10 +43,20 @@ async function campaignDb() {
   dbs.push(info.name);
   const owner = await client(info.ownerUrl);
   const r = await migrate(owner, { target: 2 });
-  assert.deepEqual(r.applied, ['0002_campaigns']);
+  assert.equal(r.current, 2);
   const { rows: [admin] } = await owner.query("insert into mailer.admins (email, password_hash) values ('ann@tangy.test', $1) returning id", [ADMIN_HASH]);
   const app = await client(info.runtimeUrl);
   return { info, owner, app, adminId: admin.id };
+}
+
+// A database at version 1 (0001 only), as Supabase is before 0002 is applied.
+async function v1Db() {
+  const { ownerUrl, name } = await emptyPgDatabase();
+  dbs.push(name);
+  const c = await client(ownerUrl);
+  const r = await migrate(c, { target: 1 });
+  assert.equal(r.current, 1);
+  return { ownerUrl, c };
 }
 
 // Confirms a campaign the way the future confirmation endpoint will: one
@@ -96,14 +107,15 @@ test('0002 applies to a fresh database (from empty, and on top of 0001); re-runn
   assert.deepEqual(rows.map((r) => [r.version, r.name, r.checksum]), listMigrations().map((m) => [m.version, m.name, m.checksum]));
 });
 
-test('without an explicit target the runner leaves a version-1 database at version 1 (0002 held)', async () => {
-  const info = await pgDatabase(':memory:');
-  dbs.push(info.name);
-  const c = await client(info.ownerUrl);
+test('approved: the default runner migrates a version-1 database to version 2; an explicit lower target still holds 0002', async () => {
+  const { c } = await v1Db();
+  const held = await migrate(c, { target: 1 });
+  assert.deepEqual([held.applied, held.held, held.current], [[], ['0002_campaigns'], 1]);
+  assert.equal((await c.query("select to_regclass('mailer.campaigns') is null as absent")).rows[0].absent, true);
   const r = await migrate(c);
-  assert.deepEqual([r.applied, r.held, r.current], [[], ['0002_campaigns'], 1]);
-  const { rows } = await c.query("select to_regclass('mailer.campaigns') is null as absent");
-  assert.equal(rows[0].absent, true);
+  assert.deepEqual([r.applied, r.held, r.current], [['0002_campaigns'], [], 2]);
+  const { rows } = await c.query("select data_type, column_default from information_schema.columns where table_schema = 'mailer' and table_name = 'campaign_recipients' and column_name = 'people'");
+  assert.deepEqual(rows, [{ data_type: 'smallint', column_default: '1' }]);
 });
 
 test('the app runs on version 2 with campaigns, on version 1 without them, and refuses a newer schema', async () => {
@@ -115,14 +127,13 @@ test('the app runs on version 2 with campaigns, on version 1 without them, and r
     assert.equal(await s2.assertSchema(), 2);
     assert.deepEqual(await s2.campaignsAvailable(), { available: true });
   } finally { await s2.close(); }
-  const v1 = await pgDatabase(':memory:');
-  dbs.push(v1.name);
-  const s1 = await openPgStore({ ...pgTestDbConfig }, { url: v1.runtimeUrl, log: quiet });
+  const v1 = await v1Db();
+  const s1 = await openPgStore({ ...pgTestDbConfig }, { url: v1.ownerUrl, log: quiet });
   try {
     assert.equal(await s1.assertSchema(), 1);
     const a = await s1.campaignsAvailable();
     assert.equal(a.available, false);
-    assert.match(a.reason, /schema version 2 \(migration 0002_campaigns\).*version 1.*not been approved/);
+    assert.match(a.reason, /schema version 2 \(migration 0002_campaigns\).*version 1.*not been applied to this database yet/);
   } finally { await s1.close(); }
   await owner.query("insert into mailer.schema_migrations (version, name, checksum) values (3, '0003_future', repeat('a', 64))");
   const s3 = await openPgStore({ ...pgTestDbConfig }, { url: info.runtimeUrl, log: quiet });
@@ -132,9 +143,7 @@ test('the app runs on version 2 with campaigns, on version 1 without them, and r
 });
 
 test('a failing 0002 leaves nothing behind (one transaction)', async () => {
-  const info = await pgDatabase(':memory:');
-  dbs.push(info.name);
-  const c = await client(info.ownerUrl);
+  const { c } = await v1Db();
   // A conflicting object makes 0002 fail part-way (its indexes need columns
   // this table lacks); everything 0002 did before that is rolled back.
   await c.query('create table mailer.campaign_recipients (x int)');
@@ -536,4 +545,30 @@ test('count guard: the confirming transaction can commit neither fewer nor more 
   await app.query('rollback');
   const { rows } = await app.query('select count(*)::int n from mailer.campaigns');
   assert.equal(rows[0].n, 0, 'nothing was committed');
+});
+
+test('campaign_recipients.people: default 1, only 1–50, fixed after confirmation', async () => {
+  const { app, adminId } = await campaignDb();
+  const id = await confirm(app, { adminId });
+  const [r] = await recipientsOf(app, id);
+  assert.equal(r.people, 1, 'default');
+  await rejects(app.query('update mailer.campaign_recipients set people = 3 where id = $1', [r.id]), '23514', 'fixed after confirmation');
+  for (const bad of [0, 51, -1]) {
+    const cid = randomUUID();
+    await app.query('begin');
+    try {
+      await app.query(`insert into mailer.campaigns (id, creation_key, created_by, session_id, session_name, name, template_version, template_hash, recipients_hash, total_recipients, csv_rows, confirmed_at, updated_at)
+        values ($1, gen_random_uuid(), $2, 's4', 'X', 'X', 1, $3, $3, 1, 1, now(), now())`, [cid, adminId, HEX('x')]);
+      await rejects(app.query(`insert into mailer.campaign_recipients (campaign_id, row_number, name, email, people, send_id, unsubscribe_hash, created_at, updated_at)
+        values ($1, 2, 'A', 'a@example.com', $2, gen_random_uuid(), repeat('f', 64), now(), now())`, [cid, bad]), '23514', `people ${bad}`);
+    } finally { await app.query('rollback'); }
+  }
+  const cid = randomUUID();
+  await app.query('begin');
+  await app.query(`insert into mailer.campaigns (id, creation_key, created_by, session_id, session_name, name, template_version, template_hash, recipients_hash, total_recipients, csv_rows, confirmed_at, updated_at)
+    values ($1, gen_random_uuid(), $2, 's4', 'X', 'X', 1, $3, $3, 1, 1, now(), now())`, [cid, adminId, HEX('y')]);
+  await app.query(`insert into mailer.campaign_recipients (campaign_id, row_number, name, email, people, send_id, unsubscribe_hash, created_at, updated_at)
+    values ($1, 2, 'A', 'a@example.com', 50, gen_random_uuid(), repeat('e', 64), now(), now())`, [cid]);
+  await app.query('commit');
+  assert.deepEqual((await recipientsOf(app, cid)).map((x) => x.people), [50]);
 });

@@ -132,6 +132,9 @@ create table if not exists mailer.campaign_recipients (
   -- when sending (so retries send byte-identical emails) and looked up by
   -- this hash when the recipient follows the link.
   unsubscribe_hash    text not null unique check (unsubscribe_hash ~ '^[0-9a-f]{64}$'),
+  -- Number of people on this invitation (the CSV "people" column; rendered
+  -- as {{number_of_people}}). Fixed at confirmation, like name and email.
+  people              smallint not null default 1 check (people between 1 and 50),
   status              text not null default 'pending'
                       check (status in ('pending', 'claimed', 'accepted', 'rejected', 'failed', 'unresolved', 'skipped', 'dry_run')),
   -- Provider requests started (attempts) and claims taken (claim_count).
@@ -289,8 +292,8 @@ begin
     end if;
     return new;
   end if;
-  if (new.id, new.campaign_id, new.row_number, new.name, new.email, new.send_id, new.unsubscribe_hash, new.created_at)
-     is distinct from (old.id, old.campaign_id, old.row_number, old.name, old.email, old.send_id, old.unsubscribe_hash, old.created_at) then
+  if (new.id, new.campaign_id, new.row_number, new.name, new.email, new.send_id, new.unsubscribe_hash, new.people, new.created_at)
+     is distinct from (old.id, old.campaign_id, old.row_number, old.name, old.email, old.send_id, old.unsubscribe_hash, old.people, old.created_at) then
     raise exception 'recipient details cannot change' using errcode = '23514';
   end if;
   if new.attempts < old.attempts or new.claim_count < old.claim_count then

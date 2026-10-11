@@ -167,3 +167,40 @@ test('v2 → current: backup taken first; only campaign and suppression tables a
     } finally { up.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('v4 → v5: backup first; existing campaign recipients get people = 1; the value is then fixed and range-checked', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tangy-v5-'));
+  try {
+    // A real version-4 database: today's schema minus what v5 adds, with a campaign.
+    const db = openDb(dir);
+    db.raw.exec('drop trigger campaign_recipients_people_fixed; alter table campaign_recipients drop column people; pragma user_version = 4');
+    db.createAdmin('ann@tangy.test', 'scrypt$x');
+    const admin = db.getAdminByEmail('ann@tangy.test');
+    const id = '11111111-1111-4111-8111-111111111111';
+    const h = (c) => c.repeat(64);
+    db.raw.exec('begin');
+    db.raw.prepare(`insert into campaigns (id, creation_key, created_by, session_id, session_name, name, template_version, template_hash, recipients_hash,
+                    total_recipients, csv_rows, confirmed_at, updated_at) values (?, ?, ?, 's1', 'S', 'N', 1, ?, ?, 2, 2, 1, 1)`)
+      .run(id, '22222222-2222-4222-8222-222222222222', admin.id, h('a'), h('b'));
+    for (const [n, email] of [[2, 'a@example.com'], [3, 'b@example.com']]) {
+      db.raw.prepare(`insert into campaign_recipients (campaign_id, row_number, name, email, send_id, unsubscribe_hash, created_at, updated_at)
+                      values (?, ?, 'X', ?, ?, ?, 1, 1)`).run(id, n, email, `3333333${n}-3333-4333-8333-333333333333`, h(String(n)));
+    }
+    db.raw.exec('commit');
+    db.close();
+
+    const up = openDb(dir);
+    try {
+      assert.equal(up.raw.prepare('pragma user_version').get().user_version, 5);
+      assert.match(basename(up.migration.backup), /^mailer-before-v5-.*\.db$/);
+      const bk = new DatabaseSync(up.migration.backup, { readOnly: true });
+      assert.equal(bk.prepare('pragma user_version').get().user_version, 4, 'the backup is the untouched v4 file');
+      bk.close();
+      assert.deepEqual(up.listCampaignRecipients(id).rows.map((r) => [r.email, r.people]), [['a@example.com', 1], ['b@example.com', 1]]);
+      assert.equal(up.getCampaign(id).total_recipients, 2, 'campaign untouched');
+      assert.throws(() => up.raw.prepare('update campaign_recipients set people = 2 where campaign_id = ?').run(id), /fixed/);
+      const col = up.raw.prepare('pragma table_info(campaign_recipients)').all().find((c) => c.name === 'people');
+      assert.deepEqual([col.type, col.notnull, col.dflt_value], ['INTEGER', 1, '1']);
+    } finally { up.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

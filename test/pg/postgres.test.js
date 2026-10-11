@@ -480,10 +480,10 @@ test('db-migrate.js (real script) migrates an empty database with ONLY MIGRATION
   const run = () => spawnSync(process.execPath, ['scripts/db-migrate.js'], { cwd: root, env, encoding: 'utf8', timeout: 60_000 });
   const first = run();
   assert.equal(first.status, 0, first.stderr);
-  assert.match(first.stdout, /applied 0001_init[\s\S]*1 applied, schema version 1/);
+  assert.match(first.stdout, /applied 0001_init[\s\S]*applied 0002_campaigns[\s\S]*2 applied, schema version 2/);
   const second = run();
   assert.equal(second.status, 0, second.stderr);
-  assert.match(second.stdout, /0 applied, schema version 1/);
+  assert.match(second.stdout, /0 applied, schema version 2/);
   const pw = new URL(ownerUrl).password;
   assert.ok(!(first.stdout + first.stderr + second.stdout + second.stderr).includes(pw), 'no password printed');
   const c = await client(ownerUrl);
@@ -584,7 +584,7 @@ test('runbook rehearsal on a local empty database: owner check → migrate → 0
     // 7. owner check now sees the migrated schema and both roles
     const post = node(['scripts/db-check.js', 'owner'], ownerEnv);
     assert.equal(post.status, 0, post.stdout);
-    assert.match(post.stdout, /schema_migrations version 1/);
+    assert.match(post.stdout, /schema_migrations version 2/);
     assert.match(post.stdout, /mailer_app \(login\), mailer_runtime/);
   } finally {
     await owner.query("select pg_terminate_backend(pid) from pg_stat_activity where usename = 'mailer_app'").catch(() => {});

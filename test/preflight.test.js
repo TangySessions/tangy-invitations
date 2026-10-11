@@ -38,9 +38,12 @@ test('dry run, http origin, missing key/sender, ephemeral secret and unapproved 
   const r = await runPreflight({ env: { EMAIL_DRY_RUN: 'true', DB_BACKEND: 'postgres', DATABASE_URL: 'postgres://u:p@localhost:5432/x', DATABASE_SSL: 'disable' }, ...noDb });
   assert.equal(r.dryRunReady, true);
   assert.equal(r.liveReady, false);
-  for (const re of [/EMAIL_DRY_RUN is on/, /RESEND_API_KEY is missing/, /EMAIL_FROM is missing/, /APP_ORIGIN must be the public https address/, /set PREVIEW_TOKEN_SECRET/, /approve and apply migration 0002/]) {
+  for (const re of [/EMAIL_DRY_RUN is on/, /RESEND_API_KEY is missing/, /EMAIL_FROM is missing/, /APP_ORIGIN must be the public https address/, /set PREVIEW_TOKEN_SECRET/]) {
     assert.ok(r.blockers.some((b) => re.test(b)), String(re));
   }
+  // 0002 is approved in code; whether it has been APPLIED is the --db check.
+  assert.ok(r.lines.some((l) => l.level === 'pass' && /APPROVED_MIGRATION_VERSION=2: migration 0002_campaigns .* is approved/.test(l.text)));
+  assert.ok(!r.blockers.some((b) => /approve and apply migration 0002/.test(b)));
   const pg = await runPreflight({ env: live({ DB_BACKEND: 'postgres', DATABASE_URL: 'postgres://u:p@db.example.test:6543/x' }), checkDb: true, domainConfirmed: true, readPgVersion: async () => 1 });
   assert.ok(pg.lines.some((l) => /PostgreSQL schema version 1: campaigns unavailable \(needs 2\)/.test(l.text)));
   assert.equal(pg.liveReady, false);

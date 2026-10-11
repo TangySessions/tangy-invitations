@@ -51,6 +51,7 @@ One row per valid recipient of a confirmed campaign.
 | `row_number` (2–5000) | CSV line, for traceability. **Unique per campaign.** |
 | `name` | 1–100 characters, trimmed, no control characters, no `{{` or `}}` (mirrors `validateRecipient`) |
 | `email` | Normalized: trimmed, lower-case, 3–254 characters, contains `@`, no spaces, `,`, `;`, `<` or `>`. **Unique per campaign.** |
+| `people smallint` | Number of people on the invitation: the CSV `people` column, or 1 for `name,email` lists. 1–50, default 1, **fixed after confirmation**, rendered as `{{number_of_people}}`. |
 | `send_id uuid` **unique** | Stable Resend `Idempotency-Key` (`tangy-campaign/<send_id>`) for every request for this recipient, including retries |
 | `status` | `pending`, `claimed`, `accepted`, `rejected`, `failed`, `unresolved`, `skipped` or `dry_run` (model below) |
 | `attempts` (0–10), `claim_count` (0–20) | Provider requests made, and claims taken. `attempts <= claim_count`. Both only increase. |
@@ -74,6 +75,7 @@ These were added to 0002 rather than a new 0003, because 0002 has never been app
 - **Runtime grants on `suppressions`:** `SELECT, INSERT` only. Opt-outs are never changed or removed by the app.
 - **Row-level security:** the same `mailer_runtime_access` policy as the other tables.
 - **`claimed → skipped`** is allowed only with reason `suppressed`: an opt-out noticed right before sending.
+ - **Migration checksum:** `people` was added to `0002_campaigns` before applying the current version to the Supabase database checked during preflight (schema version 1; campaign tables absent). This changed the checksum (`2c66965b…` → `360bd697…`). Any database that applied the earlier version will fail the runner's checksum check and requires separate investigation before migration.
 - **Index `campaign_recipients_pending_email_idx`:** an opt-out skips pending recipients in every campaign.
 
 **Supabase scripts:**
